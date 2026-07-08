@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1117">
+  <title>行情看板 · A股 / 美股</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="vendor/echarts.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <h1 class="logo">📈 行情看板</h1>
+      <nav class="tabs" id="marketTabs">
+        <button class="tab active" data-market="cn">A股</button>
+        <button class="tab" data-market="us">美股</button>
+        <button class="tab" data-market="watch">自选</button>
+      </nav>
+      <div class="search-box" id="searchBox">
+        <input id="searchInput" type="search" placeholder="🔍 代码 / 名称 / 拼音" autocomplete="off">
+        <div class="search-results" id="searchResults"></div>
+      </div>
+      <span class="update-time" id="updateTime"></span>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 指数卡片 -->
+    <section class="section" id="indexSection">
+      <div class="index-cards" id="indexCards"></div>
+    </section>
+
+    <!-- 自选股 -->
+    <section class="section card" id="watchSection" style="display:none">
+      <div class="section-head"><h2>⭐ 自选股</h2></div>
+      <table class="rank-table" id="watchTable"></table>
+      <div class="loading" id="watchEmpty" style="display:none">
+        暂无自选股 —— 搜索个股或点击涨跌榜里的股票，在详情中点 ♡ 添加
+      </div>
+    </section>
+
+    <!-- 走势图 -->
+    <section class="section card" id="chartSection">
+      <div class="section-head">
+        <h2 id="chartTitle">上证指数</h2>
+        <div class="chart-switch" id="chartSwitch">
+          <button class="switch-btn active" data-type="minute">分时</button>
+          <button class="switch-btn" data-type="day">日K</button>
+          <button class="switch-btn" data-type="week">周K</button>
+          <button class="switch-btn" data-type="month">月K</button>
+        </div>
+      </div>
+      <div id="chart" class="chart"></div>
+    </section>
+
+    <!-- 市场概况 -->
+    <section class="section card" id="overviewSection">
+      <div class="section-head"><h2 id="overviewTitle">市场概况</h2></div>
+      <div id="overviewContent"></div>
+    </section>
+
+    <!-- 板块（仅A股） -->
+    <section class="section card" id="sectorSection">
+      <div class="section-head">
+        <h2>行业板块</h2>
+        <div class="chart-switch" id="sectorSwitch">
+          <button class="switch-btn active" data-view="map">涨跌</button>
+          <button class="switch-btn" data-view="flow">资金</button>
+          <button class="switch-btn" data-view="list">列表</button>
+        </div>
+      </div>
+      <div class="sector-map" id="sectorMap"></div>
+      <div class="sector-wrap" style="display:none">
+        <div class="sector-col">
+          <h3 class="up-text">领涨板块</h3>
+          <ul class="sector-list" id="sectorUp"></ul>
+        </div>
+        <div class="sector-col">
+          <h3 class="down-text">领跌板块</h3>
+          <ul class="sector-list" id="sectorDown"></ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- 涨跌幅榜 -->
+    <section class="section" id="rankSection">
+      <div class="rank-wrap">
+        <div class="card rank-col">
+          <div class="section-head"><h2 class="up-text">领涨个股</h2></div>
+          <table class="rank-table" id="rankUp"></table>
+        </div>
+        <div class="card rank-col">
+          <div class="section-head"><h2 class="down-text">领跌个股</h2></div>
+          <table class="rank-table" id="rankDown"></table>
+        </div>
+      </div>
+    </section>
+
+    <!-- 新闻 -->
+    <section class="section card">
+      <div class="section-head"><h2>📰 财经要闻</h2></div>
+      <ul class="news-list" id="newsList"></ul>
+    </section>
+
+    <footer class="footer">
+      数据来源：腾讯行情 / 新浪财经 / Yahoo Finance · 仅供参考，不构成投资建议 · 行情数据可能有延迟
+    </footer>
+  </main>
+
+  <!-- 个股详情弹窗 -->
+  <div class="modal-mask" id="stockModal" style="display:none">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">
+          <span class="modal-name" id="mName"></span>
+          <span class="modal-code" id="mCode"></span>
+        </div>
+        <div class="modal-actions">
+          <button class="icon-btn heart-btn" id="mHeart" title="加入自选">♡</button>
+          <button class="icon-btn" id="mClose" title="关闭">✕</button>
+        </div>
+      </div>
+      <div class="modal-price-row">
+        <span class="modal-price" id="mPrice">--</span>
+        <span class="modal-chg" id="mChg"></span>
+        <span class="modal-time" id="mTime"></span>
+      </div>
+      <div class="modal-stats" id="mStats"></div>
+      <div class="modal-book" id="mBook" style="display:none"></div>
+      <div class="chart-switch modal-switch" id="mChartSwitch">
+        <button class="switch-btn active" data-type="minute">分时</button>
+        <button class="switch-btn" data-type="day">日K</button>
+        <button class="switch-btn" data-type="week">周K</button>
+        <button class="switch-btn" data-type="month">月K</button>
+      </div>
+      <div id="mChart" class="modal-chart"></div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
