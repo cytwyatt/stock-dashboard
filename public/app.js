@@ -92,7 +92,9 @@ function isMarketOpen(market) {
 
 /* ---------- 指数卡片 ---------- */
 async function loadIndices() {
-  const list = await api(`/api/indices?market=${state.market}`);
+  const market = state.market;
+  const list = await api(`/api/indices?market=${market}`);
+  if (market !== state.market) return; // 响应回来前切了 tab，丢弃（快速切换时旧市场请求可能后到）
   state.indices = list;
   if (!state.activeCode || !list.find((i) => i.code === state.activeCode)) {
     state.activeCode = list[0] && list[0].code;
@@ -534,7 +536,9 @@ function setSectorView(view) {
 
 async function loadSectors() {
   if (state.market !== 'cn') return;
-  sectorList = await api('/api/sectors');
+  const list = await api('/api/sectors');
+  if (state.market !== 'cn') return; // 响应回来前切了 tab，丢弃
+  sectorList = list;
   renderSectors();
 }
 
@@ -558,10 +562,12 @@ function renderRank(el, rows) {
 }
 
 async function loadRanks() {
+  const market = state.market;
   const [up, down] = await Promise.all([
-    api(`/api/rank?market=${state.market}&dir=up`),
-    api(`/api/rank?market=${state.market}&dir=down`),
+    api(`/api/rank?market=${market}&dir=up`),
+    api(`/api/rank?market=${market}&dir=down`),
   ]);
+  if (market !== state.market) return; // 响应回来前切了 tab，丢弃
   renderRank($('#rankUp'), up.slice(0, 10));
   renderRank($('#rankDown'), down.slice(0, 10));
 }
@@ -840,6 +846,10 @@ function switchMarket(market) {
     initChat().catch(console.error);
     return;
   }
+  // 立即清掉上一市场的榜单/概况——新数据可能要等上游几秒（冷缓存时），期间不能残留旧市场内容
+  $('#rankUp').innerHTML = '';
+  $('#rankDown').innerHTML = '';
+  $('#overviewContent').innerHTML = '';
   refreshAll();
 }
 

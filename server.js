@@ -360,17 +360,22 @@ async function getRankUS(dir, count = 20) {
   }));
 }
 
-// 港股涨跌榜（新浪）。num 上限60且接口无质量筛选：翻页多取几页，
-// 过滤掉仙股/无量异动（价<1港元或成交额<2000万），凑够 count 为止
+// 港股涨跌榜（新浪）。num 上限60且接口无质量筛选：取3页按序过滤，
+// 剔除仙股/无量异动（价<1港元或成交额<2000万）后取前 count。
+// 该接口单页就要 ~2.5s，必须3页并行抓，顺序翻页会拖到8s+
 async function getRankHK(dir, count = 20) {
   const asc = dir === 'down' ? 1 : 0;
+  const pages = await Promise.all(
+    [1, 2, 3].map(async (page) => {
+      const url = `https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHKStockData?page=${page}&num=60&sort=changepercent&asc=${asc}&node=qbgg_hk`;
+      return JSON.parse(
+        await fetchText(url, { referer: 'https://vip.stock.finance.sina.com.cn/mkt/' })
+      );
+    })
+  );
   const out = [];
-  for (let page = 1; page <= 3 && out.length < count; page++) {
-    const url = `https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHKStockData?page=${page}&num=60&sort=changepercent&asc=${asc}&node=qbgg_hk`;
-    const j = JSON.parse(
-      await fetchText(url, { referer: 'https://vip.stock.finance.sina.com.cn/mkt/' })
-    );
-    if (!Array.isArray(j) || !j.length) break;
+  for (const j of pages) {
+    if (!Array.isArray(j)) continue;
     for (const s of j) {
       const price = num(s.lasttrade);
       if (price < 1 || num(s.amount) < 2e7) continue;
@@ -382,7 +387,7 @@ async function getRankHK(dir, count = 20) {
         changePct: num(s.changepercent),
         amount: num(s.amount), // 港元
       });
-      if (out.length >= count) break;
+      if (out.length >= count) return out;
     }
   }
   return out;
@@ -1031,7 +1036,8 @@ const server = http.createServer(async (req, res) => {
       const market = q === 'us' || q === 'hk' ? q : 'cn';
       const dir = u.searchParams.get('dir') === 'down' ? 'down' : 'up';
       const fn = market === 'us' ? getRankUS : market === 'hk' ? getRankHK : getRankCN;
-      const ttl = market === 'us' ? 90000 : 30000;
+      // 收盘后榜单不再变化，拉长 TTL 免得反复冷启动（港股上游要 ~5s）；盘中 TTL 与 warmCaches 一致
+      const ttl = !isMarketOpenSrv(market) ? 600000 : market === 'us' ? 90000 : 30000;
       return sendJSON(res, 200, await cached(`rank:${market}:${dir}`, ttl, () => fn(dir)));
     }
     // LLM 配置（Key 只存服务器，GET 仅返回掩码）
