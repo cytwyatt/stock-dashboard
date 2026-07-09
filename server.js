@@ -18,18 +18,36 @@ const UA =
 // ---------- 简单内存缓存（刷新失败时返回过期数据兜底；同 key 并发请求合并） ----------
 const cache = new Map();
 const inflight = new Map();
+const CACHE_MAX = 1000;
+
+// Map 同时充当一个轻量 LRU：命中/写入时移到末尾，超过上限淘汰最久未使用项。
+// 动态 code/search/quotes key 都来自请求，不能让公开访问把缓存无限撑大。
+function setCachedValue(key, value) {
+  cache.delete(key);
+  cache.set(key, value);
+  while (cache.size > CACHE_MAX) cache.delete(cache.keys().next().value);
+}
+
 async function cached(key, ttlMs, fn) {
   const hit = cache.get(key);
-  if (hit && hit.expire > Date.now()) return hit.data;
+  if (hit && hit.expire > Date.now()) {
+    setCachedValue(key, hit);
+    return hit.data;
+  }
   if (inflight.has(key)) return inflight.get(key);
   const p = (async () => {
     try {
       const data = await fn();
-      cache.set(key, { expire: Date.now() + ttlMs, data });
+      setCachedValue(key, { expire: Date.now() + ttlMs, data });
       return data;
     } catch (err) {
       if (hit) {
         console.error(`[stale] ${key}: ${err.message}，返回上次缓存`);
+        // 给失败的上游一个短暂冷却期，避免过期兜底后每个请求都立即重试。
+        setCachedValue(key, {
+          expire: Date.now() + Math.min(ttlMs, 15000),
+          data: hit.data,
+        });
         return hit.data;
       }
       throw err;
@@ -62,7 +80,7 @@ const num = (v) => {
 };
 
 // Yahoo 代码可含 ^ . = -（如 ^DJI、BTC-USD、GC=F、BRK.B）
-const sanitizeCode = (s) => String(s).replace(/[^a-zA-Z0-9.^=-]/g, '').slice(0, 20);
+const sanitizeCode = (s) => String(s ?? '').replace(/[^a-zA-Z0-9.^=-]/g, '').slice(0, 20);
 
 // "20260707161445" -> "07-07 16:14"
 const fmtCNTime = (s) =>
@@ -323,14 +341,19 @@ async function getSectors() {
 }
 
 // ---------- 涨跌幅榜 ----------
+const isAbnormalCNName = (name) => /^(?:N|C)|ST|退/i.test(String(name || ''));
+
 async function getRankCN(dir, count = 20) {
   const asc = dir === 'down' ? 1 : 0;
-  const url = `https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=${count + 20}&sort=changepercent&asc=${asc}&node=hs_a`;
+  // 多取候选后过滤新股/ST/退市整理及低价低成交标的，避免原始涨幅榜被异动股占满。
+  const url = `https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=100&sort=changepercent&asc=${asc}&node=hs_a`;
   const j = JSON.parse(
     await fetchText(url, { referer: 'https://finance.sina.com.cn' })
   );
   return (j || [])
-    .filter((s) => num(s.trade) > 0) // 去掉停牌
+    .filter((s) =>
+      num(s.trade) >= 1 && num(s.amount) >= 2e7 && !isAbnormalCNName(s.name)
+    )
     .slice(0, count)
     .map((s) => ({
       code: s.symbol,
@@ -557,7 +580,7 @@ async function countLimit(dir) {
       const pct = Math.abs(num(s.changepercent));
       pageMin = Math.min(pageMin, pct);
       const is20cm = /^(sh68|sz30)/.test(s.symbol); // 科创板/创业板 20%
-      if (pct >= (is20cm ? 19.8 : 9.8) && !/ST/i.test(s.name)) count++;
+      if (pct >= (is20cm ? 19.8 : 9.8) && !isAbnormalCNName(s.name)) count++;
     }
     if (pageMin < 9.8) break; // 已排序，后面不会再有涨跌停
   }
@@ -588,22 +611,63 @@ const US_MACRO = [
 const getOverviewUS = () => sparkQuotes(US_MACRO);
 
 // ---------- 自选股（服务器端持久化，tailnet 内所有设备共享） ----------
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.MARKET_DATA_DIR || path.join(__dirname, 'data');
+
+function protectDataFile(file) {
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch (e) {
+    if (e.code !== 'ENOENT') console.error(`[chmod] ${file}: ${e.message}`);
+  }
+}
+
+function writeDataJSON(file, data) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  // 唯一临时文件通过 wx+0600 创建，避免旧 .tmp 权限过宽时先写入敏感内容。
+  const tmp = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  let fd;
+  try {
+    fd = fs.openSync(tmp, 'wx', 0o600);
+    fs.writeFileSync(fd, JSON.stringify(data, null, 2));
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+    fs.renameSync(tmp, file);
+    fs.chmodSync(file, 0o600);
+  } catch (e) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* 已关闭 */ }
+    }
+    try { fs.unlinkSync(tmp); } catch { /* 未创建或已 rename */ }
+    throw e;
+  }
+}
+
 const WATCH_FILE = path.join(DATA_DIR, 'watchlist.json');
+protectDataFile(WATCH_FILE);
+
+function normalizeWatchlist(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .slice(0, 200)
+    .map((s) => ({
+      code: sanitizeCode(s && s.code),
+      name: String((s && s.name) || '').slice(0, 40),
+      market: s && (s.market === 'us' || s.market === 'hk') ? s.market : 'cn',
+    }))
+    .filter((s) => s.code);
+}
 
 function readWatchlist() {
   try {
-    return JSON.parse(fs.readFileSync(WATCH_FILE, 'utf8'));
+    return normalizeWatchlist(JSON.parse(fs.readFileSync(WATCH_FILE, 'utf8')));
   } catch {
     return [];
   }
 }
 
 function writeWatchlist(list) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = WATCH_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(list, null, 2));
-  fs.renameSync(tmp, WATCH_FILE); // 原子替换，避免写一半损坏
+  writeDataJSON(WATCH_FILE, list);
 }
 
 // ---------- 新闻（新浪财经滚动） ----------
@@ -620,12 +684,30 @@ async function getNews(count = 30) {
 
 // ---------- LLM 问答（OpenAI 兼容协议：DeepSeek/Kimi/通义/GLM/OpenAI 均可用） ----------
 const LLM_FILE = path.join(DATA_DIR, 'llm.json');
+protectDataFile(LLM_FILE);
+
+function getStoredLLMConfig() {
+  try { return JSON.parse(fs.readFileSync(LLM_FILE, 'utf8')); }
+  catch { return {}; }
+}
+
+function normalizeLLMBaseUrl(value) {
+  const parsed = new URL(String(value || '').trim());
+  if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname ||
+      parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('invalid LLM base URL');
+  }
+  return parsed.toString().replace(/\/+$/, '');
+}
 
 function getLLMConfig() {
-  let cfg = {};
-  try { cfg = JSON.parse(fs.readFileSync(LLM_FILE, 'utf8')); } catch { /* 未配置 */ }
+  const cfg = getStoredLLMConfig();
+  const rawBaseUrl = process.env.LLM_BASE_URL || cfg.baseUrl || 'https://api.deepseek.com/v1';
+  let baseUrl;
+  try { baseUrl = normalizeLLMBaseUrl(rawBaseUrl); }
+  catch { baseUrl = String(rawBaseUrl).trim().replace(/\/+$/, ''); }
   return {
-    baseUrl: (process.env.LLM_BASE_URL || cfg.baseUrl || 'https://api.deepseek.com/v1').replace(/\/$/, ''),
+    baseUrl,
     apiKey: process.env.LLM_API_KEY || cfg.apiKey || '',
     model: process.env.LLM_MODEL || cfg.model || 'deepseek-chat',
   };
@@ -662,7 +744,7 @@ async function runLLMTool(name, args) {
     }
     case 'get_intraday': {
       const code = sanitizeCode(args.code || '');
-      const d = await cached(`min:${code}`, isCNCode(code) ? 30000 : 60000, () => getMinute(code));
+      const d = await cached(`min:${code}`, isTXCode(code) ? 30000 : 60000, () => getMinute(code));
       // 抽样：每10个点取1个 + 最后一个点，控制token
       const pts = d.points.filter((_, i) => i % 10 === 0);
       if (d.points.length) pts.push(d.points[d.points.length - 1]);
@@ -681,7 +763,8 @@ async function runLLMTool(name, args) {
       const m = args.market === 'us' || args.market === 'hk' ? args.market : 'cn';
       const dir = args.dir === 'down' ? 'down' : 'up';
       const fn = m === 'us' ? getRankUS : m === 'hk' ? getRankHK : getRankCN;
-      return cached(`rank:${m}:${dir}`, m === 'us' ? 90000 : 30000, () => fn(dir));
+      const ttl = !isMarketOpenSrv(m) ? 600000 : m === 'us' ? 90000 : 30000;
+      return cached(`rank:${m}:${dir}`, ttl, () => fn(dir));
     }
     case 'get_overview': {
       const m = args.market === 'us' ? 'us' : 'cn';
@@ -703,10 +786,7 @@ function maskKey(k) {
 }
 
 function writeLLMConfig(cfg) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = LLM_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
-  fs.renameSync(tmp, LLM_FILE);
+  writeDataJSON(LLM_FILE, cfg);
 }
 
 // 测试当前配置能否连通（发一条极短消息，不带工具）
@@ -766,95 +846,152 @@ async function llmComplete(cfg, messages) {
 
 // ---------- 对话会话存储（服务器端，跨设备共享） ----------
 const CHATS_FILE = path.join(DATA_DIR, 'chats.json');
+protectDataFile(CHATS_FILE);
+
+const isValidChatSessionId = (id) => typeof id === 'string' && /^[\w-]{1,80}$/.test(id);
+function createChatSessionId(used = new Set()) {
+  let id;
+  do { id = `c${Date.now()}${Math.random().toString(36).slice(2, 6)}`; }
+  while (used.has(id));
+  return id;
+}
 
 function readChats() {
-  try { return JSON.parse(fs.readFileSync(CHATS_FILE, 'utf8')); } catch { return { sessions: [] }; }
+  try {
+    const data = JSON.parse(fs.readFileSync(CHATS_FILE, 'utf8'));
+    return data && Array.isArray(data.sessions) ? data : { sessions: [] };
+  } catch { return { sessions: [] }; }
 }
 function writeChats(data) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = CHATS_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
-  fs.renameSync(tmp, CHATS_FILE);
+  writeDataJSON(CHATS_FILE, data);
 }
+
+// 旧版本允许任意 sessionId；启动时保留会话内容并迁移非法/重复 ID。
+function migrateChatSessionIds() {
+  const store = readChats();
+  const used = new Set();
+  const sessions = [];
+  let changed = false;
+  for (const session of store.sessions) {
+    if (!session || typeof session !== 'object' || Array.isArray(session)) {
+      changed = true;
+      continue;
+    }
+    if (!Array.isArray(session.messages)) {
+      session.messages = [];
+      changed = true;
+    }
+    if (!isValidChatSessionId(session.id) || used.has(session.id)) {
+      session.id = createChatSessionId(used);
+      changed = true;
+    }
+    used.add(session.id);
+    sessions.push(session);
+  }
+  store.sessions = sessions;
+  if (changed) writeChats(store);
+}
+migrateChatSessionIds();
 
 function sseSend(res, obj) {
   res.write(`data: ${JSON.stringify(obj)}\n\n`);
 }
 
-async function handleChat(req, res, body) {
-  const { sessionId, message } = JSON.parse(body);
-  const text = String(message || '').trim().slice(0, 2000);
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-store',
-    Connection: 'keep-alive',
-  });
-  const cfg = getLLMConfig();
+// 同一会话的请求必须串行：否则较慢的旧请求会用整份 session 覆盖较新的消息。
+const chatQueues = new Map();
+async function withChatLock(sessionId, fn) {
+  const prev = chatQueues.get(sessionId) || Promise.resolve();
+  const run = prev.catch(() => {}).then(fn);
+  chatQueues.set(sessionId, run);
   try {
-    if (!cfg.apiKey) {
-      sseSend(res, { type: 'error', message: '尚未配置模型 API Key——点击左侧「⚙ 模型设置」，选择服务商并填入 Key 即可使用。' });
-      return res.end();
-    }
-    if (!text) { sseSend(res, { type: 'error', message: '消息为空' }); return res.end(); }
-
-    const store = readChats();
-    let session = store.sessions.find((s) => s.id === sessionId);
-    if (!session) {
-      session = { id: sessionId || `c${Date.now()}`, title: '', createdAt: Date.now(), messages: [] };
-      store.sessions.unshift(session);
-    }
-    if (!session.title) session.title = text.slice(0, 24);
-    session.messages.push({ role: 'user', content: text });
-    session.updatedAt = Date.now();
-    writeChats(store);
-
-    // 上下文：系统提示 + 最近12条历史（含刚追加的这条用户消息）
-    const convo = [
-      { role: 'system', content: llmSystemPrompt() },
-      ...session.messages.slice(-12).map((m) => ({ role: m.role, content: m.content })),
-    ];
-
-    let answer = '';
-    for (let round = 0; round < 6; round++) {
-      const msg = await llmComplete(cfg, convo);
-      if (msg.tool_calls && msg.tool_calls.length) {
-        convo.push(msg);
-        for (const tc of msg.tool_calls) {
-          let args = {};
-          try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* 参数解析失败按空处理 */ }
-          sseSend(res, { type: 'tool', name: tc.function.name, args });
-          let result;
-          try {
-            result = await runLLMTool(tc.function.name, args);
-          } catch (e) {
-            result = { error: e.message };
-          }
-          convo.push({
-            role: 'tool',
-            tool_call_id: tc.id,
-            content: JSON.stringify(result).slice(0, 12000),
-          });
-        }
-        continue;
-      }
-      answer = msg.content || '';
-      break;
-    }
-    if (!answer) answer = '（分析轮次超限，请换个更具体的问题）';
-
-    session.messages.push({ role: 'assistant', content: answer });
-    session.updatedAt = Date.now();
-    const store2 = readChats();
-    const idx = store2.sessions.findIndex((s) => s.id === session.id);
-    if (idx >= 0) store2.sessions[idx] = session; else store2.sessions.unshift(session);
-    writeChats(store2);
-
-    sseSend(res, { type: 'answer', content: answer, sessionId: session.id, title: session.title });
-  } catch (e) {
-    console.error('[chat]', e.message);
-    sseSend(res, { type: 'error', message: e.message });
+    return await run;
+  } finally {
+    if (chatQueues.get(sessionId) === run) chatQueues.delete(sessionId);
   }
-  res.end();
+}
+
+async function handleChat(res, payload) {
+  const rawId = payload.sessionId;
+  if (rawId != null && !isValidChatSessionId(rawId)) {
+    return sendJSON(res, 400, { error: 'sessionId 格式不正确' });
+  }
+  const sessionId = rawId || createChatSessionId(new Set(readChats().sessions.map((s) => s.id)));
+  const message = payload.message;
+  const text = String(message || '').trim().slice(0, 2000);
+  if (!text) return sendJSON(res, 400, { error: '消息为空' });
+
+  return withChatLock(sessionId, async () => {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-store',
+      Connection: 'keep-alive',
+    });
+    const cfg = getLLMConfig();
+    try {
+      if (!cfg.apiKey) {
+        sseSend(res, { type: 'error', message: '尚未配置模型 API Key——点击左侧「⚙ 模型设置」，选择服务商并填入 Key 即可使用。' });
+        return res.end();
+      }
+
+      const store = readChats();
+      let session = store.sessions.find((s) => s.id === sessionId);
+      if (!session) {
+        session = { id: sessionId, title: '', createdAt: Date.now(), messages: [] };
+        store.sessions.unshift(session);
+      }
+      if (!session.title) session.title = text.slice(0, 24);
+      session.messages.push({ role: 'user', content: text });
+      session.updatedAt = Date.now();
+      writeChats(store);
+
+      // 上下文：系统提示 + 最近12条历史（含刚追加的这条用户消息）
+      const convo = [
+        { role: 'system', content: llmSystemPrompt() },
+        ...session.messages.slice(-12).map((m) => ({ role: m.role, content: m.content })),
+      ];
+
+      let answer = '';
+      for (let round = 0; round < 6; round++) {
+        const msg = await llmComplete(cfg, convo);
+        if (msg.tool_calls && msg.tool_calls.length) {
+          convo.push(msg);
+          for (const tc of msg.tool_calls) {
+            let args = {};
+            try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* 参数解析失败按空处理 */ }
+            sseSend(res, { type: 'tool', name: tc.function.name, args });
+            let result;
+            try {
+              result = await runLLMTool(tc.function.name, args);
+            } catch (e) {
+              result = { error: e.message };
+            }
+            convo.push({
+              role: 'tool',
+              tool_call_id: tc.id,
+              content: JSON.stringify(result).slice(0, 12000),
+            });
+          }
+          continue;
+        }
+        answer = msg.content || '';
+        break;
+      }
+      if (!answer) answer = '（分析轮次超限，请换个更具体的问题）';
+
+      session.messages.push({ role: 'assistant', content: answer });
+      session.updatedAt = Date.now();
+      const store2 = readChats();
+      const idx = store2.sessions.findIndex((s) => s.id === session.id);
+      if (idx >= 0) store2.sessions[idx] = session; else store2.sessions.unshift(session);
+      writeChats(store2);
+
+      sseSend(res, { type: 'answer', content: answer, sessionId: session.id, title: session.title });
+    } catch (e) {
+      console.error('[chat]', e.message);
+      sseSend(res, { type: 'error', message: e.message });
+    }
+    res.end();
+  });
 }
 
 // ---------- HTTP 服务 ----------
@@ -987,30 +1124,30 @@ const server = http.createServer(async (req, res) => {
   const p = u.pathname;
   res.gzipOK = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
 
-  // 口令门：仅在设置了 MARKET_PASSWORD 时启用
-  if (AUTH_TOKEN) {
-    if (p === '/__login' && req.method === 'POST') {
-      const pw = new URLSearchParams(await readBody(req)).get('password') || '';
-      const token = crypto.createHash('sha256').update('market-auth:' + pw).digest('hex');
-      if (safeEq(token, AUTH_TOKEN)) {
-        // 不加 Secure：Tailscale 私网走 http 也要能登录；公网 funnel 本身是 https
-        res.writeHead(302, {
-          'Set-Cookie': `market_auth=${AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_MAXAGE}`,
-          Location: '/',
-        });
-        return res.end();
-      }
-      res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(loginPage('口令错误'));
-    }
-    if (!isAuthed(req)) {
-      if (p.startsWith('/api/')) return sendJSON(res, 401, { error: '未授权' });
-      res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-      return res.end(loginPage(''));
-    }
-  }
-
   try {
+    // 口令门：仅在设置了 MARKET_PASSWORD 时启用
+    if (AUTH_TOKEN) {
+      if (p === '/__login' && req.method === 'POST') {
+        const pw = new URLSearchParams(await readBody(req)).get('password') || '';
+        const token = crypto.createHash('sha256').update('market-auth:' + pw).digest('hex');
+        if (safeEq(token, AUTH_TOKEN)) {
+          // 不加 Secure：Tailscale 私网走 http 也要能登录；公网 funnel 本身是 https
+          res.writeHead(302, {
+            'Set-Cookie': `market_auth=${AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_MAXAGE}`,
+            Location: '/',
+          });
+          return res.end();
+        }
+        res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(loginPage('口令错误'));
+      }
+      if (!isAuthed(req)) {
+        if (p.startsWith('/api/')) return sendJSON(res, 401, { error: '未授权' });
+        res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+        return res.end(loginPage(''));
+      }
+    }
+
     if (p === '/api/indices') {
       const q = u.searchParams.get('market');
       const market = q === 'us' || q === 'hk' ? q : 'cn';
@@ -1052,15 +1189,45 @@ const server = http.createServer(async (req, res) => {
         });
       }
       if (req.method === 'POST') {
-        const body = JSON.parse(await readBody(req));
+        let body;
+        try { body = JSON.parse(await readBody(req)); }
+        catch { return sendJSON(res, 400, { error: 'JSON 格式不正确' }); }
+        if (!body || typeof body !== 'object' || Array.isArray(body)) {
+          return sendJSON(res, 400, { error: '请求体格式不正确' });
+        }
         const cur = getLLMConfig();
-        const baseUrl = String(body.baseUrl || '').trim().replace(/\/+$/, '').slice(0, 200);
+        const stored = getStoredLLMConfig();
+        const rawBaseUrl = String(body.baseUrl || '').trim().slice(0, 200);
         const model = String(body.model || '').trim().slice(0, 100);
-        const apiKey = String(body.apiKey || '').trim().slice(0, 300) || cur.apiKey; // 留空则保留原 Key
-        if (!/^https?:\/\/.+/.test(baseUrl)) return sendJSON(res, 400, { error: '接口地址格式不正确' });
+        const enteredKey = String(body.apiKey || '').trim().slice(0, 300);
+        let baseUrl;
+        try { baseUrl = normalizeLLMBaseUrl(rawBaseUrl); }
+        catch { return sendJSON(res, 400, { error: '接口地址格式不正确' }); }
         if (!model) return sendJSON(res, 400, { error: '模型名称不能为空' });
+        if ((process.env.LLM_BASE_URL || process.env.LLM_API_KEY) && baseUrl !== cur.baseUrl) {
+          return sendJSON(res, 400, { error: '接口地址由环境变量约束，不能在页面中修改' });
+        }
+        if (process.env.LLM_MODEL && model !== cur.model) {
+          return sendJSON(res, 400, { error: '模型名称由环境变量配置，不能在页面中修改' });
+        }
+        if (process.env.LLM_API_KEY && enteredKey) {
+          return sendJSON(res, 400, { error: 'API Key 由环境变量配置，不能在页面中修改' });
+        }
+        if (baseUrl !== cur.baseUrl && cur.apiKey && !enteredKey) {
+          return sendJSON(res, 400, { error: '更换接口地址时请重新输入 API Key' });
+        }
+        // 环境变量 Key 永不写回磁盘；保存其他字段时只保留文件中原有的 Key。
+        const previousFileKey = String(stored.apiKey || '');
+        const apiKey = process.env.LLM_API_KEY
+          ? previousFileKey
+          : enteredKey || (baseUrl === cur.baseUrl ? cur.apiKey : '');
         writeLLMConfig({ baseUrl, apiKey, model });
-        return sendJSON(res, 200, { ok: true, configured: !!apiKey, keyMask: maskKey(apiKey) });
+        const effective = getLLMConfig();
+        return sendJSON(res, 200, {
+          ok: true,
+          configured: !!effective.apiKey,
+          keyMask: maskKey(effective.apiKey),
+        });
       }
       return sendJSON(res, 405, { error: 'method not allowed' });
     }
@@ -1069,8 +1236,13 @@ const server = http.createServer(async (req, res) => {
     }
     // LLM 对话
     if (p === '/api/chat' && req.method === 'POST') {
-      const body = await readBody(req);
-      return handleChat(req, res, body);
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return sendJSON(res, 400, { error: 'JSON 格式不正确' }); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        return sendJSON(res, 400, { error: '请求体格式不正确' });
+      }
+      return await handleChat(res, body);
     }
     if (p === '/api/chat/sessions') {
       if (req.method === 'GET') {
@@ -1084,7 +1256,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (req.method === 'POST') {
         const store = readChats();
-        const session = { id: `c${Date.now()}${Math.random().toString(36).slice(2, 6)}`, title: '', createdAt: Date.now(), updatedAt: Date.now(), messages: [] };
+        const session = { id: createChatSessionId(new Set(store.sessions.map((s) => s.id))), title: '', createdAt: Date.now(), updatedAt: Date.now(), messages: [] };
         store.sessions.unshift(session);
         writeChats(store);
         return sendJSON(res, 200, { id: session.id });
@@ -1100,9 +1272,13 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(res, 200, { id: session.id, title: session.title, messages: session.messages });
       }
       if (req.method === 'DELETE') {
-        store.sessions = store.sessions.filter((s) => s.id !== mSess[1]);
-        writeChats(store);
-        return sendJSON(res, 200, { ok: true });
+        const result = await withChatLock(mSess[1], async () => {
+          const latest = readChats();
+          latest.sessions = latest.sessions.filter((s) => s.id !== mSess[1]);
+          writeChats(latest);
+          return { ok: true };
+        });
+        return sendJSON(res, 200, result);
       }
       return sendJSON(res, 405, { error: 'method not allowed' });
     }
@@ -1118,14 +1294,7 @@ const server = http.createServer(async (req, res) => {
           try {
             const arr = JSON.parse(body);
             if (!Array.isArray(arr)) throw new Error('expect array');
-            const list = arr
-              .slice(0, 200)
-              .map((s) => ({
-                code: sanitizeCode(s.code),
-                name: String(s.name || '').slice(0, 40),
-                market: s.market === 'us' || s.market === 'hk' ? s.market : 'cn',
-              }))
-              .filter((s) => s.code);
+            const list = normalizeWatchlist(arr);
             writeWatchlist(list);
             sendJSON(res, 200, { ok: true, count: list.length });
           } catch (e) {
@@ -1176,6 +1345,10 @@ const server = http.createServer(async (req, res) => {
     serveStatic(req, res, full);
   } catch (err) {
     console.error(`[ERR] ${p}:`, err.message);
+    if (res.headersSent) {
+      if (!res.writableEnded) res.end();
+      return;
+    }
     sendJSON(res, 502, { error: err.message });
   }
 });
@@ -1229,9 +1402,9 @@ function warmCaches() {
     warm('news', 180000, () => getNews());
   }
 }
-setInterval(warmCaches, 25000);
+if (process.env.MARKET_DISABLE_WARM !== '1') setInterval(warmCaches, 25000);
 
 server.listen(PORT, () => {
   console.log(`行情看板已启动: http://localhost:${PORT}`);
-  warmCaches();
+  if (process.env.MARKET_DISABLE_WARM !== '1') warmCaches();
 });

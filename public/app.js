@@ -1,5 +1,17 @@
 /* 行情看板前端逻辑 */
 const $ = (sel) => document.querySelector(sel);
+const escapeHtml = (value) => String(value ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
+function safeHttpUrl(value) {
+  try {
+    const u = new URL(String(value), location.href);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? escapeHtml(u.href) : '#';
+  } catch { return '#'; }
+}
 
 const state = {
   market: 'cn',        // cn | hk | us | watch | llm
@@ -13,23 +25,37 @@ const MARKET_LABELS = { cn: 'A股', hk: '港股', us: '美股' };
 /* ---------- 自选股（存服务器，所有设备共享） ---------- */
 const WATCH_KEY = 'watchlist'; // 旧版 localStorage key，仅用于一次性迁移
 let watchList = []; // 服务器数据的内存镜像
+let watchSaveChain = Promise.resolve();
+let watchMutation = 0;
 
 const getWatch = () => watchList;
 const isWatched = (code) => watchList.some((s) => s.code === code);
 
 async function pushWatch() {
-  await fetch('/api/watchlist', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(watchList),
+  // 捕获本次快照并串行保存，避免连续点击时较慢的旧 POST 最后到达、覆盖新状态。
+  const body = JSON.stringify(watchList);
+  const save = watchSaveChain.then(async () => {
+    const res = await fetch('/api/watchlist', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+    });
+    if (!res.ok) throw new Error(`/api/watchlist -> ${res.status}`);
   });
+  watchSaveChain = save.catch(() => {});
+  return save;
 }
 
 function toggleWatch(item) {
   if (isWatched(item.code)) watchList = watchList.filter((s) => s.code !== item.code);
   else watchList.push({ code: item.code, name: item.name || '', market: item.market || 'cn' });
-  pushWatch().catch(console.error);
-  if (state.market === 'watch') loadWatch().catch(console.error);
+  const mutation = ++watchMutation;
+  pushWatch()
+    .then(() => {
+      // 只让最后一次修改重新拉取，避免旧保存完成后的 GET 短暂回滚内存镜像。
+      if (mutation === watchMutation && state.market === 'watch') return loadWatch();
+    })
+    .catch(console.error);
 }
 
 // 启动时拉取服务器自选；如本地还有旧版 localStorage 数据则合并上传后清除
@@ -103,8 +129,8 @@ async function loadIndices() {
   wrap.innerHTML = list
     .map(
       (i) => `
-    <div class="index-card ${i.code === state.activeCode ? 'active' : ''}" data-code="${i.code}">
-      <div class="idx-name">${i.name}</div>
+    <div class="index-card ${i.code === state.activeCode ? 'active' : ''}" data-code="${escapeHtml(i.code)}">
+      <div class="idx-name">${escapeHtml(i.name)}</div>
       <div class="idx-price ${colorCls(i.change)}">${i.price.toFixed(2)}</div>
       <div class="idx-chg ${colorCls(i.change)}">${sign(i.change)}${i.change.toFixed(2)} · ${fmtPct(i.changePct)}</div>
     </div>`
@@ -411,8 +437,8 @@ async function loadOverview() {
         ${d
           .map(
             (q) => `
-        <div class="macro-item" data-code="${q.code}" data-name="${q.name}">
-          <div class="m-name">${q.name}</div>
+        <div class="macro-item" data-code="${escapeHtml(q.code)}" data-name="${escapeHtml(q.name)}">
+          <div class="m-name">${escapeHtml(q.name)}</div>
           <div class="m-price">${q.price >= 1000 ? q.price.toFixed(0) : q.price.toFixed(2)}${q.unit || ''}</div>
           <div class="m-chg ${colorCls(q.changePct)}">${fmtPct(q.changePct)}</div>
         </div>`
@@ -469,10 +495,10 @@ function renderSectorMap(mode) {
       formatter(p) {
         const d = p.data;
         return (
-          `<b>${d.name}</b>　<span style="color:${d.chg >= 0 ? UP : DOWN}">${fmtPct(d.chg)}</span>` +
+          `<b>${escapeHtml(d.name)}</b>　<span style="color:${d.chg >= 0 ? UP : DOWN}">${fmtPct(d.chg)}</span>` +
           `<br/>主力净流入 <span style="color:${d.inflow >= 0 ? UP : DOWN}">${fmtInflow(d.inflow)}</span>` +
           `<br/>成交额 ${(d.value / 1e4).toFixed(0)}亿` +
-          (d.leader ? `<br/>领涨 ${d.leader.name} ${fmtPct(d.leader.changePct)}` : '')
+          (d.leader ? `<br/>领涨 ${escapeHtml(d.leader.name)} ${fmtPct(d.leader.changePct)}` : '')
         );
       },
     },
@@ -504,9 +530,9 @@ function renderSectorList() {
       .map(
         (s) => `
       <li>
-        <span class="sector-name">${s.name}</span>
+        <span class="sector-name">${escapeHtml(s.name)}</span>
         <span class="sector-pct ${colorCls(s.changePct)}">${fmtPct(s.changePct)}</span>
-        ${s.leader ? `<span class="sector-leader" data-code="${s.leader.code}" data-name="${s.leader.name}">${s.leader.name} ${fmtPct(s.leader.changePct)}</span>` : ''}
+        ${s.leader ? `<span class="sector-leader" data-code="${escapeHtml(s.leader.code)}" data-name="${escapeHtml(s.leader.name)}">${escapeHtml(s.leader.name)} ${fmtPct(s.leader.changePct)}</span>` : ''}
       </li>`
       )
       .join('');
@@ -549,8 +575,8 @@ function renderRank(el, rows) {
     rows
       .map(
         (s) => `
-      <tr data-code="${s.code}" data-name="${s.name}">
-        <td><div class="stock-name">${s.name}</div><div class="stock-code">${s.code.toUpperCase()}</div></td>
+      <tr data-code="${escapeHtml(s.code)}" data-name="${escapeHtml(s.name)}">
+        <td><div class="stock-name">${escapeHtml(s.name)}</div><div class="stock-code">${escapeHtml(s.code.toUpperCase())}</div></td>
         <td>${s.price.toFixed(2)}</td>
         <td class="${colorCls(s.changePct)}">${fmtPct(s.changePct)}</td>
       </tr>`
@@ -574,8 +600,16 @@ async function loadRanks() {
 
 /* ---------- 自选股列表 ---------- */
 async function loadWatch() {
-  // 先从服务器拉最新（可能在其他设备上改过）
-  try { watchList = await api('/api/watchlist'); } catch (e) { console.error(e); }
+  // 先等本窗口的保存队列落盘，再拉其他设备可能更新过的版本。
+  // GET 前后都校验 mutation，防止慢响应覆盖用户刚刚修改的内存状态。
+  const mutation = watchMutation;
+  await watchSaveChain;
+  if (mutation !== watchMutation) return;
+  try {
+    const latest = await api('/api/watchlist');
+    if (mutation !== watchMutation) return;
+    watchList = latest;
+  } catch (e) { console.error(e); }
   const list = getWatch();
   const table = $('#watchTable');
   $('#watchEmpty').style.display = list.length ? 'none' : '';
@@ -590,11 +624,11 @@ async function loadWatch() {
         const q = byCode.get(s.code);
         const name = (q && q.name) || s.name;
         return `
-      <tr data-code="${s.code}" data-name="${name}">
-        <td><div class="stock-name">${name}</div><div class="stock-code">${s.code.toUpperCase()}</div></td>
+      <tr data-code="${escapeHtml(s.code)}" data-name="${escapeHtml(name)}">
+        <td><div class="stock-name">${escapeHtml(name)}</div><div class="stock-code">${escapeHtml(s.code.toUpperCase())}</div></td>
         <td>${q ? q.price.toFixed(2) : '--'}</td>
         <td class="${q ? colorCls(q.changePct) : ''}">${q ? fmtPct(q.changePct) : '--'}</td>
-        <td><button class="del-btn" data-del="${s.code}" title="移除">✕</button></td>
+        <td><button class="del-btn" data-del="${escapeHtml(s.code)}" title="移除">✕</button></td>
       </tr>`;
       })
       .join('');
@@ -769,6 +803,7 @@ function setModalChartType(type) {
 
 /* ---------- 个股搜索 ---------- */
 let searchTimer = null;
+let searchReq = 0;
 function hideSearchResults() {
   $('#searchResults').style.display = 'none';
 }
@@ -778,9 +813,9 @@ function renderSearchResults(list) {
   box.innerHTML = list
     .map(
       (s) => `
-    <div class="search-item" data-code="${s.code}" data-name="${s.name}">
-      <span class="s-name">${s.name}</span>
-      <span class="s-code">${s.code.toUpperCase()}</span>
+    <div class="search-item" data-code="${escapeHtml(s.code)}" data-name="${escapeHtml(s.name)}">
+      <span class="s-name">${escapeHtml(s.name)}</span>
+      <span class="s-code">${escapeHtml(s.code.toUpperCase())}</span>
       <span class="s-badge">${MARKET_LABELS[s.market] || '美股'}</span>
     </div>`
     )
@@ -789,6 +824,8 @@ function renderSearchResults(list) {
   box.querySelectorAll('.search-item').forEach((el) =>
     el.addEventListener('mousedown', (e) => {
       e.preventDefault();
+      searchReq++;
+      clearTimeout(searchTimer);
       openStock(el.dataset.code, el.dataset.name);
       $('#searchInput').value = '';
       hideSearchResults();
@@ -810,10 +847,10 @@ async function loadNews() {
   $('#newsList').innerHTML = list
     .map(
       (n) => `
-    <li><a href="${n.url}" target="_blank" rel="noopener">
+    <li><a href="${safeHttpUrl(n.url)}" target="_blank" rel="noopener">
       <span class="news-time">${fmtNewsTime(n.time)}</span>
-      <span class="news-title">${n.title}</span>
-      ${n.media ? `<span class="news-media">${n.media}</span>` : ''}
+      <span class="news-title">${escapeHtml(n.title)}</span>
+      ${n.media ? `<span class="news-media">${escapeHtml(n.media)}</span>` : ''}
     </a></li>`
     )
     .join('');
@@ -877,11 +914,11 @@ function refreshAll() {
 }
 
 /* ---------- AI 问答 ---------- */
-const chat = { sessions: [], activeId: null, busy: false, inited: false };
+const chat = { sessions: [], activeId: null, busy: false, inited: false, selectReq: 0 };
 
 // 极简 Markdown 渲染（加粗/代码/列表/标题/段落）
 function mdToHtml(src) {
-  const esc = src.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const esc = escapeHtml(src);
   let h = esc
     .replace(/```[\w]*\n?([\s\S]*?)```/g, (_, c) => `\x01pre${btoa(unescape(encodeURIComponent(c)))}\x01`)
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
@@ -921,7 +958,8 @@ function setChatStatus(text) {
     el.className = 'chat-status';
     $('#chatMsgs').appendChild(el);
   }
-  el.innerHTML = `<span class="dot">●</span> ${text}`;
+  el.innerHTML = '<span class="dot">●</span> ';
+  el.appendChild(document.createTextNode(text));
   $('#chatMsgs').scrollTop = $('#chatMsgs').scrollHeight;
 }
 
@@ -930,9 +968,9 @@ function renderChatSessions() {
   list.innerHTML = chat.sessions
     .map(
       (s) => `
-    <li class="${s.id === chat.activeId ? 'active' : ''}" data-id="${s.id}">
-      <span class="cs-title">${s.title || '新对话'}</span>
-      <button class="del-btn" data-del="${s.id}" title="删除">✕</button>
+    <li class="${s.id === chat.activeId ? 'active' : ''}" data-id="${escapeHtml(s.id)}">
+      <span class="cs-title">${escapeHtml(s.title || '新对话')}</span>
+      <button class="del-btn" data-del="${escapeHtml(s.id)}" title="删除">✕</button>
     </li>`
     )
     .join('');
@@ -947,17 +985,19 @@ function renderChatSessions() {
   );
   const sel = $('#chatSessSelect');
   sel.innerHTML = chat.sessions
-    .map((s) => `<option value="${s.id}" ${s.id === chat.activeId ? 'selected' : ''}>${s.title || '新对话'}</option>`)
+    .map((s) => `<option value="${escapeHtml(s.id)}" ${s.id === chat.activeId ? 'selected' : ''}>${escapeHtml(s.title || '新对话')}</option>`)
     .join('');
 }
 
 async function selectChatSession(id) {
+  const req = ++chat.selectReq;
   chat.activeId = id;
   renderChatSessions();
   const wrap = $('#chatMsgs');
   wrap.innerHTML = '';
   try {
-    const d = await api(`/api/chat/sessions/${id}`);
+    const d = await api(`/api/chat/sessions/${encodeURIComponent(id)}`);
+    if (req !== chat.selectReq || id !== chat.activeId) return;
     if (!d.messages.length) {
       wrap.innerHTML = '<div class="chat-empty">问我任何股票问题：大盘走势、板块资金、个股分析、市场情绪……<br>回答基于看板的实时数据。</div>';
       return;
@@ -975,7 +1015,7 @@ async function newChatSession() {
 }
 
 async function deleteChatSession(id) {
-  await fetch(`/api/chat/sessions/${id}`, { method: 'DELETE' });
+  await fetch(`/api/chat/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
   chat.sessions = chat.sessions.filter((s) => s.id !== id);
   if (chat.activeId === id) {
     if (chat.sessions.length) await selectChatSession(chat.sessions[0].id);
@@ -1014,6 +1054,8 @@ async function sendChat() {
   const input = $('#chatInput');
   const text = input.value.trim();
   if (!text || chat.busy || !chat.activeId) return;
+  const sessionId = chat.activeId;
+  const viewReq = chat.selectReq;
   chat.busy = true;
   $('#chatSend').disabled = true;
   input.value = '';
@@ -1027,8 +1069,12 @@ async function sendChat() {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: chat.activeId, message: text }),
+      body: JSON.stringify({ sessionId, message: text }),
     });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      throw new Error(j.error || `/api/chat -> ${res.status}`);
+    }
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = '';
@@ -1045,25 +1091,33 @@ async function sendChat() {
         if (ev.type === 'tool') {
           const label = TOOL_LABELS[ev.name] || ev.name;
           const target = ev.args && (ev.args.code || ev.args.query || ev.args.market) || '';
-          setChatStatus(`${label} ${target}…`);
+          if (chat.activeId === sessionId) setChatStatus(`${label} ${target}…`);
         } else if (ev.type === 'answer') {
-          setChatStatus(null);
-          appendChatMsg('assistant', mdToHtml(ev.content));
+          if (chat.activeId === sessionId) {
+            setChatStatus(null);
+            if (chat.selectReq === viewReq) appendChatMsg('assistant', mdToHtml(ev.content));
+            else await selectChatSession(sessionId); // 中途切走又切回时，从服务端重载，避免重复/漏消息
+          }
           // 用服务端返回的标题同步侧边栏（首问后自动命名）
           if (ev.title) {
-            const s = chat.sessions.find((x) => x.id === chat.activeId);
+            const s = chat.sessions.find((x) => x.id === sessionId);
             if (s && s.title !== ev.title) { s.title = ev.title; renderChatSessions(); }
           }
         } else if (ev.type === 'error') {
-          setChatStatus(null);
-          appendChatMsg('assistant', `<p>⚠️ ${ev.message}</p>`);
+          if (chat.activeId === sessionId) {
+            setChatStatus(null);
+            appendChatMsg('assistant', `<p>⚠️ ${escapeHtml(ev.message)}</p>`);
+          }
         }
       }
     }
   } catch (e) {
-    setChatStatus(null);
-    appendChatMsg('assistant', `<p>⚠️ 请求失败：${e.message}</p>`);
+    if (chat.activeId === sessionId) {
+      setChatStatus(null);
+      appendChatMsg('assistant', `<p>⚠️ 请求失败：${escapeHtml(e.message)}</p>`);
+    }
   }
+  if (chat.activeId === sessionId) setChatStatus(null);
   chat.busy = false;
   $('#chatSend').disabled = false;
 }
@@ -1130,10 +1184,10 @@ async function saveLLMConfig() {
   });
   const j = await res.json();
   if (!res.ok) throw new Error(j.error || '保存失败');
-  if (j.keyMask) {
-    $('#llmKey').value = '';
-    $('#llmKey').placeholder = `已保存 ${j.keyMask}（留空表示不修改）`;
-  }
+  $('#llmKey').value = '';
+  $('#llmKey').placeholder = j.configured
+    ? `已保存 ${j.keyMask}（留空表示不修改）`
+    : 'sk-…';
   return j;
 }
 
@@ -1161,15 +1215,22 @@ $('#mHeart').addEventListener('click', () => {
 });
 $('#searchInput').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
+  const req = ++searchReq;
   const q = e.target.value.trim();
   if (!q) { hideSearchResults(); return; }
   searchTimer = setTimeout(async () => {
     try {
-      renderSearchResults(await api(`/api/search?q=${encodeURIComponent(q)}`));
+      const list = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      if (req !== searchReq) return;
+      renderSearchResults(list);
     } catch (err) { console.error(err); }
   }, 300);
 });
-$('#searchInput').addEventListener('blur', () => setTimeout(hideSearchResults, 200));
+$('#searchInput').addEventListener('blur', () => {
+  searchReq++;
+  clearTimeout(searchTimer);
+  setTimeout(hideSearchResults, 200);
+});
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeStock();
 });
