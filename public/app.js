@@ -131,8 +131,8 @@ async function loadChart() {
     if (state.chartType === 'minute') {
       const d = await api(`/api/minute?code=${encodeURIComponent(state.activeCode)}`);
       if (req !== chartReq) return;
-      if (!d.points || d.points.length < 5) {
-        // 分时数据不全时自动退回日K
+      if (!d.points || d.points.length < 2) {
+        // 分时数据基本为空才退回日K；美股是5分钟一根，开盘早段点少属正常，别误退
         setChartType('day');
         return;
       }
@@ -719,7 +719,7 @@ async function loadModalChart() {
     if (modal.chartType === 'minute') {
       const d = await api(`/api/minute?code=${encodeURIComponent(modal.code)}`);
       if (req !== modal.req) return;
-      if (!d.points || d.points.length < 5) {
+      if (!d.points || d.points.length < 2) {
         setModalChartType('day');
         return;
       }
