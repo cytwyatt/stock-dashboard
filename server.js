@@ -7,6 +7,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const crypto = require('crypto');
 
 const PORT = process.env.PORT || 3888;
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -853,10 +854,87 @@ function serveStatic(req, res, full) {
   res.end(entry.raw);
 }
 
+// ---------- 访问口令（可选）：设了环境变量 MARKET_PASSWORD 才启用 ----------
+// 用途：把服务通过 Tailscale Funnel 暴露到公网时挡住陌生人。
+// 不设该变量则完全不生效，Tailscale 私网内直连行为不变。
+const AUTH_PASSWORD = process.env.MARKET_PASSWORD || '';
+const AUTH_TOKEN = AUTH_PASSWORD
+  ? crypto.createHash('sha256').update('market-auth:' + AUTH_PASSWORD).digest('hex')
+  : '';
+const AUTH_MAXAGE = 60 * 60 * 24 * 30; // cookie 有效期 30 天
+
+function parseCookies(req) {
+  const out = {};
+  for (const part of (req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  }
+  return out;
+}
+function isAuthed(req) {
+  if (!AUTH_TOKEN) return true;
+  return parseCookies(req).market_auth === AUTH_TOKEN;
+}
+function safeEq(a, b) {
+  const ba = Buffer.from(a), bb = Buffer.from(b);
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
+function loginPage(err) {
+  // 自包含登录页，不依赖任何静态资源；输入框字号 16px 防 iOS 缩放
+  return `<!doctype html><html lang="zh"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>行情看板 · 登录</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#0e1117;color:#e6e6e6;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  form{width:min(88vw,320px);padding:28px 24px;background:#171b22;border:1px solid #262c36;
+    border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.4)}
+  h1{margin:0 0 4px;font-size:20px}
+  p{margin:0 0 18px;font-size:13px;color:#8b949e}
+  input{width:100%;padding:11px 12px;font-size:16px;border-radius:8px;border:1px solid #30363d;
+    background:#0d1117;color:#e6e6e6;outline:none}
+  input:focus{border-color:#e5484d}
+  button{width:100%;margin-top:14px;padding:11px;font-size:15px;font-weight:600;border:0;
+    border-radius:8px;background:#e5484d;color:#fff;cursor:pointer}
+  .err{color:#e5484d;font-size:13px;margin-top:10px;min-height:16px}
+</style></head><body>
+<form method="POST" action="/__login">
+  <h1>📈 行情看板</h1>
+  <p>请输入访问口令</p>
+  <input type="password" name="password" placeholder="口令" autofocus autocomplete="current-password">
+  <div class="err">${err ? err : ''}</div>
+  <button type="submit">进入</button>
+</form></body></html>`;
+}
+
 const server = http.createServer(async (req, res) => {
   const u = new URL(req.url, `http://localhost:${PORT}`);
   const p = u.pathname;
   res.gzipOK = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
+
+  // 口令门：仅在设置了 MARKET_PASSWORD 时启用
+  if (AUTH_TOKEN) {
+    if (p === '/__login' && req.method === 'POST') {
+      const pw = new URLSearchParams(await readBody(req)).get('password') || '';
+      const token = crypto.createHash('sha256').update('market-auth:' + pw).digest('hex');
+      if (safeEq(token, AUTH_TOKEN)) {
+        // 不加 Secure：Tailscale 私网走 http 也要能登录；公网 funnel 本身是 https
+        res.writeHead(302, {
+          'Set-Cookie': `market_auth=${AUTH_TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${AUTH_MAXAGE}`,
+          Location: '/',
+        });
+        return res.end();
+      }
+      res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(loginPage('口令错误'));
+    }
+    if (!isAuthed(req)) {
+      if (p.startsWith('/api/')) return sendJSON(res, 401, { error: '未授权' });
+      res.writeHead(401, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+      return res.end(loginPage(''));
+    }
+  }
 
   try {
     if (p === '/api/indices') {
