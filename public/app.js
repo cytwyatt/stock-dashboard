@@ -803,24 +803,32 @@ function switchMarket(market) {
   document.querySelectorAll('#marketTabs .tab').forEach((b) =>
     b.classList.toggle('active', b.dataset.market === market)
   );
-  const isWatch = market === 'watch';
-  $('#indexSection').style.display = isWatch ? 'none' : '';
-  $('#chartSection').style.display = isWatch ? 'none' : '';
-  $('#overviewSection').style.display = isWatch ? 'none' : '';
-  $('#rankSection').style.display = isWatch ? 'none' : '';
-  $('#watchSection').style.display = isWatch ? '' : 'none';
+  const isQuote = market === 'cn' || market === 'us';
+  $('#indexSection').style.display = isQuote ? '' : 'none';
+  $('#chartSection').style.display = isQuote ? '' : 'none';
+  $('#overviewSection').style.display = isQuote ? '' : 'none';
+  $('#rankSection').style.display = isQuote ? '' : 'none';
+  $('#watchSection').style.display = market === 'watch' ? '' : 'none';
+  $('#chatSection').style.display = market === 'llm' ? '' : 'none';
+  $('#newsSection').style.display = market === 'llm' ? 'none' : '';
   // 行业板块仅A股有数据
   $('#sectorSection').style.display = market === 'cn' ? '' : 'none';
   state.chartType = 'minute';
   document.querySelectorAll('#chartSwitch .switch-btn').forEach((b) =>
     b.classList.toggle('active', b.dataset.type === state.chartType)
   );
+  if (market === 'llm') {
+    $('#updateTime').textContent = '';
+    initChat().catch(console.error);
+    return;
+  }
   refreshAll();
 }
 
 let lastQuotesAt = 0;
 async function refreshQuotes() {
   lastQuotesAt = Date.now();
+  if (state.market === 'llm') return;
   if (state.market === 'watch') {
     try { await loadWatch(); } catch (e) { console.error(e); }
     return;
@@ -838,6 +846,267 @@ async function refreshQuotes() {
 function refreshAll() {
   refreshQuotes();
   loadNews().catch(console.error);
+}
+
+/* ---------- AI 问答 ---------- */
+const chat = { sessions: [], activeId: null, busy: false, inited: false };
+
+// 极简 Markdown 渲染（加粗/代码/列表/标题/段落）
+function mdToHtml(src) {
+  const esc = src.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  let h = esc
+    .replace(/```[\w]*\n?([\s\S]*?)```/g, (_, c) => `\x01pre${btoa(unescape(encodeURIComponent(c)))}\x01`)
+    .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
+    .replace(/^#{2,4} (.*)$/gm, '<h4>$1</h4>')
+    .replace(/^\s*[-•*] (.*)$/gm, '<li>$1</li>')
+    .replace(/^\s*(\d+)\. (.*)$/gm, '<li>$1. $2</li>');
+  h = h
+    .split(/\n{2,}/)
+    .map((par) => {
+      if (par.includes('<li>')) {
+        return `<ul>${par.replace(/\n(?!<li>)/g, '<br>').replace(/\n/g, '')}</ul>`;
+      }
+      if (par.startsWith('<h4>') || par.startsWith('\x01pre')) return par;
+      return `<p>${par.replace(/\n/g, '<br>')}</p>`;
+    })
+    .join('');
+  return h.replace(/\x01pre([A-Za-z0-9+/=]*)\x01/g, (_, b) => `<pre>${decodeURIComponent(escape(atob(b)))}</pre>`);
+}
+
+function appendChatMsg(role, html) {
+  const wrap = $('#chatMsgs');
+  const div = document.createElement('div');
+  div.className = `chat-msg ${role}`;
+  div.innerHTML = `<div class="chat-bubble">${html}</div>`;
+  wrap.appendChild(div);
+  wrap.scrollTop = wrap.scrollHeight;
+  return div;
+}
+
+function setChatStatus(text) {
+  let el = $('#chatStatusLine');
+  if (!text) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'chatStatusLine';
+    el.className = 'chat-status';
+    $('#chatMsgs').appendChild(el);
+  }
+  el.innerHTML = `<span class="dot">●</span> ${text}`;
+  $('#chatMsgs').scrollTop = $('#chatMsgs').scrollHeight;
+}
+
+function renderChatSessions() {
+  const list = $('#chatSessList');
+  list.innerHTML = chat.sessions
+    .map(
+      (s) => `
+    <li class="${s.id === chat.activeId ? 'active' : ''}" data-id="${s.id}">
+      <span class="cs-title">${s.title || '新对话'}</span>
+      <button class="del-btn" data-del="${s.id}" title="删除">✕</button>
+    </li>`
+    )
+    .join('');
+  list.querySelectorAll('li').forEach((li) =>
+    li.addEventListener('click', () => selectChatSession(li.dataset.id))
+  );
+  list.querySelectorAll('.del-btn').forEach((btn) =>
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      deleteChatSession(btn.dataset.del);
+    })
+  );
+  const sel = $('#chatSessSelect');
+  sel.innerHTML = chat.sessions
+    .map((s) => `<option value="${s.id}" ${s.id === chat.activeId ? 'selected' : ''}>${s.title || '新对话'}</option>`)
+    .join('');
+}
+
+async function selectChatSession(id) {
+  chat.activeId = id;
+  renderChatSessions();
+  const wrap = $('#chatMsgs');
+  wrap.innerHTML = '';
+  try {
+    const d = await api(`/api/chat/sessions/${id}`);
+    if (!d.messages.length) {
+      wrap.innerHTML = '<div class="chat-empty">问我任何股票问题：大盘走势、板块资金、个股分析、市场情绪……<br>回答基于看板的实时数据。</div>';
+      return;
+    }
+    for (const m of d.messages) {
+      appendChatMsg(m.role, m.role === 'user' ? mdToHtml(m.content) : mdToHtml(m.content));
+    }
+  } catch (e) { console.error(e); }
+}
+
+async function newChatSession() {
+  const d = await fetch('/api/chat/sessions', { method: 'POST' }).then((r) => r.json());
+  chat.sessions.unshift({ id: d.id, title: '', updatedAt: Date.now(), count: 0 });
+  await selectChatSession(d.id);
+}
+
+async function deleteChatSession(id) {
+  await fetch(`/api/chat/sessions/${id}`, { method: 'DELETE' });
+  chat.sessions = chat.sessions.filter((s) => s.id !== id);
+  if (chat.activeId === id) {
+    if (chat.sessions.length) await selectChatSession(chat.sessions[0].id);
+    else await newChatSession();
+  } else {
+    renderChatSessions();
+  }
+}
+
+async function initChat() {
+  // 每次进入都刷新列表（可能在其他设备上新建过会话）
+  try {
+    chat.sessions = await api('/api/chat/sessions');
+  } catch (e) { chat.sessions = chat.sessions || []; }
+  if (!chat.sessions.length) return newChatSession();
+  if (!chat.activeId || !chat.sessions.find((s) => s.id === chat.activeId)) {
+    await selectChatSession(chat.sessions[0].id);
+  } else {
+    renderChatSessions();
+  }
+}
+
+const TOOL_LABELS = {
+  get_indices: '查询大盘指数',
+  get_quote: '查询个股报价',
+  get_kline: '查询K线历史',
+  get_intraday: '查询分时走势',
+  get_sectors: '查询板块资金流',
+  get_rank: '查询涨跌榜',
+  get_overview: '查询市场概况',
+  get_news: '翻阅财经新闻',
+  search_stock: '搜索股票',
+};
+
+async function sendChat() {
+  const input = $('#chatInput');
+  const text = input.value.trim();
+  if (!text || chat.busy || !chat.activeId) return;
+  chat.busy = true;
+  $('#chatSend').disabled = true;
+  input.value = '';
+  input.style.height = 'auto';
+  const empty = $('#chatMsgs .chat-empty');
+  if (empty) empty.remove();
+  appendChatMsg('user', mdToHtml(text));
+  setChatStatus('思考中…');
+
+  try {
+    const res = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: chat.activeId, message: text }),
+    });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const chunk = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        if (!chunk.startsWith('data: ')) continue;
+        const ev = JSON.parse(chunk.slice(6));
+        if (ev.type === 'tool') {
+          const label = TOOL_LABELS[ev.name] || ev.name;
+          const target = ev.args && (ev.args.code || ev.args.query || ev.args.market) || '';
+          setChatStatus(`${label} ${target}…`);
+        } else if (ev.type === 'answer') {
+          setChatStatus(null);
+          appendChatMsg('assistant', mdToHtml(ev.content));
+          // 用服务端返回的标题同步侧边栏（首问后自动命名）
+          if (ev.title) {
+            const s = chat.sessions.find((x) => x.id === chat.activeId);
+            if (s && s.title !== ev.title) { s.title = ev.title; renderChatSessions(); }
+          }
+        } else if (ev.type === 'error') {
+          setChatStatus(null);
+          appendChatMsg('assistant', `<p>⚠️ ${ev.message}</p>`);
+        }
+      }
+    }
+  } catch (e) {
+    setChatStatus(null);
+    appendChatMsg('assistant', `<p>⚠️ 请求失败：${e.message}</p>`);
+  }
+  chat.busy = false;
+  $('#chatSend').disabled = false;
+}
+
+/* ---------- 模型设置 ---------- */
+const LLM_PROVIDERS = [
+  { id: 'deepseek', name: 'DeepSeek（深度求索）', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'], keyUrl: 'platform.deepseek.com' },
+  { id: 'kimi', name: 'Kimi（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k2-turbo-preview', 'kimi-k2-thinking'], keyUrl: 'platform.moonshot.cn' },
+  { id: 'qwen', name: '通义千问（阿里云百炼）', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-turbo'], keyUrl: 'bailian.console.aliyun.com' },
+  { id: 'glm', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4.6', 'glm-4.5-air'], keyUrl: 'open.bigmodel.cn' },
+  { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', models: ['gpt-4o-mini', 'gpt-4o'], keyUrl: 'platform.openai.com' },
+  { id: 'custom', name: '自定义（OpenAI 兼容协议）', baseUrl: '', models: [], keyUrl: '' },
+];
+
+function llmProviderById(id) {
+  return LLM_PROVIDERS.find((p) => p.id === id) || LLM_PROVIDERS[LLM_PROVIDERS.length - 1];
+}
+
+function fillLLMProvider(id, keepModel) {
+  const p = llmProviderById(id);
+  $('#llmProvider').value = p.id;
+  if (p.baseUrl) $('#llmBaseUrl').value = p.baseUrl;
+  $('#llmModelList').innerHTML = p.models.map((m) => `<option value="${m}">`).join('');
+  if (!keepModel) $('#llmModel').value = p.models[0] || '';
+  $('#llmHint').textContent = p.keyUrl
+    ? `API Key 在 ${p.keyUrl} 注册获取。Key 只保存在你自己的服务器上。`
+    : '填写任意 OpenAI 兼容服务的接口地址（以 /v1 结尾）。';
+}
+
+function setLLMStatus(text, ok) {
+  const el = $('#llmStatus');
+  el.textContent = text || '';
+  el.className = `llm-status ${ok === true ? 'ok' : ok === false ? 'err' : ''}`;
+}
+
+async function openLLMConfig() {
+  $('#llmProvider').innerHTML = LLM_PROVIDERS.map((p) => `<option value="${p.id}">${p.name}</option>`).join('');
+  setLLMStatus('');
+  $('#llmKey').value = '';
+  try {
+    const cfg = await api('/api/llm-config');
+    const match = LLM_PROVIDERS.find((p) => p.baseUrl && cfg.baseUrl.startsWith(p.baseUrl.replace(/\/v1$/, '')));
+    fillLLMProvider(match ? match.id : 'custom', true);
+    $('#llmBaseUrl').value = cfg.baseUrl;
+    $('#llmModel').value = cfg.model;
+    $('#llmKey').placeholder = cfg.configured ? `已保存 ${cfg.keyMask}（留空表示不修改）` : 'sk-…';
+    if (!cfg.configured) setLLMStatus('尚未配置 API Key', false);
+  } catch (e) {
+    fillLLMProvider('deepseek');
+  }
+  $('#llmModal').style.display = '';
+}
+
+async function saveLLMConfig() {
+  const body = {
+    baseUrl: $('#llmBaseUrl').value.trim(),
+    model: $('#llmModel').value.trim(),
+    apiKey: $('#llmKey').value.trim(),
+  };
+  const res = await fetch('/api/llm-config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const j = await res.json();
+  if (!res.ok) throw new Error(j.error || '保存失败');
+  if (j.keyMask) {
+    $('#llmKey').value = '';
+    $('#llmKey').placeholder = `已保存 ${j.keyMask}（留空表示不修改）`;
+  }
+  return j;
 }
 
 /* ---------- 事件绑定 & 定时刷新 ---------- */
@@ -875,6 +1144,44 @@ $('#searchInput').addEventListener('input', (e) => {
 $('#searchInput').addEventListener('blur', () => setTimeout(hideSearchResults, 200));
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeStock();
+});
+$('#chatNew').addEventListener('click', () => newChatSession().catch(console.error));
+$('#chatNewMobile').addEventListener('click', () => newChatSession().catch(console.error));
+$('#chatSessSelect').addEventListener('change', (e) => selectChatSession(e.target.value));
+$('#chatSend').addEventListener('click', sendChat);
+$('#chatInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendChat();
+  }
+});
+$('#chatInput').addEventListener('input', (e) => {
+  e.target.style.height = 'auto';
+  e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+});
+$('#llmConfigBtn').addEventListener('click', () => openLLMConfig().catch(console.error));
+$('#llmConfigBtnM').addEventListener('click', () => openLLMConfig().catch(console.error));
+$('#llmClose').addEventListener('click', () => { $('#llmModal').style.display = 'none'; });
+$('#llmModal').addEventListener('click', (e) => {
+  if (e.target === $('#llmModal')) $('#llmModal').style.display = 'none';
+});
+$('#llmProvider').addEventListener('change', (e) => fillLLMProvider(e.target.value));
+$('#llmSave').addEventListener('click', async () => {
+  try {
+    const j = await saveLLMConfig();
+    setLLMStatus(j.configured ? '✓ 已保存，立即生效' : '已保存，但还没有 API Key', j.configured);
+  } catch (e) { setLLMStatus(e.message, false); }
+});
+$('#llmTest').addEventListener('click', async () => {
+  const btn = $('#llmTest');
+  btn.disabled = true;
+  try {
+    await saveLLMConfig();
+    setLLMStatus('正在测试连接…');
+    const r = await fetch('/api/llm-config/test', { method: 'POST' }).then((x) => x.json());
+    setLLMStatus(r.ok ? `✓ ${r.message}` : `✗ ${r.message}`, r.ok);
+  } catch (e) { setLLMStatus(e.message, false); }
+  btn.disabled = false;
 });
 
 initWatch().catch(console.error);

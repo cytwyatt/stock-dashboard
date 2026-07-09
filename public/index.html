@@ -16,6 +16,7 @@
         <button class="tab active" data-market="cn">A股</button>
         <button class="tab" data-market="us">美股</button>
         <button class="tab" data-market="watch">自选</button>
+        <button class="tab" data-market="llm">AI</button>
       </nav>
       <div class="search-box" id="searchBox">
         <input id="searchInput" type="search" placeholder="🔍 代码 / 名称 / 拼音" autocomplete="off">
@@ -97,8 +98,31 @@
       </div>
     </section>
 
+    <!-- AI 问答 -->
+    <section class="section" id="chatSection" style="display:none">
+      <div class="chat-layout">
+        <aside class="chat-sidebar card">
+          <button class="chat-new" id="chatNew">＋ 新建对话</button>
+          <ul class="chat-sess-list" id="chatSessList"></ul>
+          <button class="chat-new chat-config" id="llmConfigBtn">⚙ 模型设置</button>
+        </aside>
+        <div class="chat-main card">
+          <div class="chat-mobile-bar">
+            <select id="chatSessSelect"></select>
+            <button class="icon-btn" id="chatNewMobile" title="新建对话">＋</button>
+            <button class="icon-btn" id="llmConfigBtnM" title="模型设置">⚙</button>
+          </div>
+          <div class="chat-msgs" id="chatMsgs"></div>
+          <div class="chat-inputbar">
+            <textarea id="chatInput" rows="1" placeholder="问点股票问题，如：今天大盘怎么样？"></textarea>
+            <button id="chatSend">发送</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- 新闻 -->
-    <section class="section card">
+    <section class="section card" id="newsSection">
       <div class="section-head"><h2>📰 财经要闻</h2></div>
       <ul class="news-list" id="newsList"></ul>
     </section>
@@ -135,6 +159,35 @@
         <button class="switch-btn" data-type="month">月K</button>
       </div>
       <div id="mChart" class="modal-chart"></div>
+    </div>
+  </div>
+
+  <!-- 模型设置弹窗 -->
+  <div class="modal-mask" id="llmModal" style="display:none">
+    <div class="modal llm-modal">
+      <div class="modal-head">
+        <div class="modal-title"><span class="modal-name">⚙ 模型设置</span></div>
+        <div class="modal-actions">
+          <button class="icon-btn" id="llmClose" title="关闭">✕</button>
+        </div>
+      </div>
+      <div class="llm-form">
+        <label>服务商</label>
+        <select id="llmProvider"></select>
+        <label>模型</label>
+        <input id="llmModel" list="llmModelList" placeholder="模型名称" autocomplete="off">
+        <datalist id="llmModelList"></datalist>
+        <label>API Key</label>
+        <input id="llmKey" type="password" placeholder="sk-…" autocomplete="off">
+        <label>接口地址</label>
+        <input id="llmBaseUrl" placeholder="https://…/v1" autocomplete="off">
+        <div class="llm-hint" id="llmHint"></div>
+        <div class="llm-btns">
+          <button class="llm-btn secondary" id="llmTest">保存并测试</button>
+          <button class="llm-btn primary" id="llmSave">保存</button>
+        </div>
+        <div class="llm-status" id="llmStatus"></div>
+      </div>
     </div>
   </div>
 

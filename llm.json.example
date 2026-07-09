@@ -1,0 +1,8 @@
+{
+  "//": "复制此文件到 data/llm.json 并填入你的 API Key（OpenAI 兼容协议）",
+  "//baseUrl示例": "DeepSeek: https://api.deepseek.com/v1 | Kimi: https://api.moonshot.cn/v1 | 通义: https://dashscope.aliyuncs.com/compatible-mode/v1 | 智谱: https://open.bigmodel.cn/api/paas/v4",
+  "//model示例": "deepseek-chat | kimi-k2-turbo-preview | qwen-plus | glm-4.6",
+  "baseUrl": "https://api.deepseek.com/v1",
+  "apiKey": "sk-你的key",
+  "model": "deepseek-chat"
+}

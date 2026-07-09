@@ -543,6 +543,245 @@ async function getNews(count = 30) {
   }));
 }
 
+// ---------- LLM 问答（OpenAI 兼容协议：DeepSeek/Kimi/通义/GLM/OpenAI 均可用） ----------
+const LLM_FILE = path.join(DATA_DIR, 'llm.json');
+
+function getLLMConfig() {
+  let cfg = {};
+  try { cfg = JSON.parse(fs.readFileSync(LLM_FILE, 'utf8')); } catch { /* 未配置 */ }
+  return {
+    baseUrl: (process.env.LLM_BASE_URL || cfg.baseUrl || 'https://api.deepseek.com/v1').replace(/\/$/, ''),
+    apiKey: process.env.LLM_API_KEY || cfg.apiKey || '',
+    model: process.env.LLM_MODEL || cfg.model || 'deepseek-chat',
+  };
+}
+
+// 提供给 LLM 的工具集（复用现有数据函数，全部走缓存）
+const LLM_TOOLS = [
+  { name: 'get_indices', description: '获取大盘指数实时行情。market=cn 返回上证/深成/创业板/沪深300/科创50；market=us 返回道琼斯/纳斯达克/标普500', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'us'] } }, required: ['market'] } },
+  { name: 'get_quote', description: '获取单只股票的详细实时报价（价格、涨跌幅、成交量额、换手率、市盈率、市值、五档盘口等）。A股代码格式如 sh600519/sz300750，美股代码如 AAPL/TSLA，也支持 ^VIX、GC=F 黄金、BTC-USD 等', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
+  { name: 'get_kline', description: '获取股票或指数的K线历史（日K/周K/月K，最近最多40根，含开高低收和成交量）', parameters: { type: 'object', properties: { code: { type: 'string' }, period: { type: 'string', enum: ['day', 'week', 'month'] } }, required: ['code'] } },
+  { name: 'get_intraday', description: '获取当日分时走势（抽样点位），可用于判断盘中走势形态', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
+  { name: 'get_sectors', description: '获取A股31个申万行业板块的涨跌幅、主力资金净流入（亿元）和领涨股，可判断市场热点和资金流向', parameters: { type: 'object', properties: {} } },
+  { name: 'get_rank', description: '获取涨幅榜或跌幅榜个股。market=cn 沪深两市，market=us 美股', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'us'] }, dir: { type: 'string', enum: ['up', 'down'] } }, required: ['market', 'dir'] } },
+  { name: 'get_overview', description: '获取市场概况。market=cn 返回涨跌家数、涨停跌停数、两市成交额；market=us 返回VIX恐慌指数、美债收益率、美元指数、黄金、原油、比特币', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'us'] } }, required: ['market'] } },
+  { name: 'get_news', description: '获取最新财经新闻标题列表（新浪财经滚动要闻）', parameters: { type: 'object', properties: {} } },
+  { name: 'search_stock', description: '按名称/代码/拼音搜索股票，返回股票代码。回答个股问题前如果不确定代码，先用这个工具查', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
+].map((t) => ({ type: 'function', function: t }));
+
+async function runLLMTool(name, args) {
+  switch (name) {
+    case 'get_indices': {
+      const m = args.market === 'us' ? 'us' : 'cn';
+      return cached(`idx:${m}`, 15000, () => getIndices(m));
+    }
+    case 'get_quote': {
+      const code = sanitizeCode(args.code || '');
+      return cached(`q:${code}`, 15000, () => getQuote(code));
+    }
+    case 'get_kline': {
+      const code = sanitizeCode(args.code || '');
+      const period = ['day', 'week', 'month'].includes(args.period) ? args.period : 'day';
+      const data = await cached(`k:${code}:120:${period}`, 300000, () => getKline(code, 120, period));
+      return data.slice(-40);
+    }
+    case 'get_intraday': {
+      const code = sanitizeCode(args.code || '');
+      const d = await cached(`min:${code}`, isCNCode(code) ? 30000 : 60000, () => getMinute(code));
+      // 抽样：每10个点取1个 + 最后一个点，控制token
+      const pts = d.points.filter((_, i) => i % 10 === 0);
+      if (d.points.length) pts.push(d.points[d.points.length - 1]);
+      return { code: d.code, prevClose: d.prevClose, points: pts.map((p) => ({ t: p.t, price: p.price })) };
+    }
+    case 'get_sectors': {
+      const list = await cached('sectors', 30000, getSectors);
+      return list.map((s) => ({
+        name: s.name,
+        changePct: s.changePct,
+        inflowYi: +(s.inflow / 1e4).toFixed(2),
+        leader: s.leader ? `${s.leader.name} ${s.leader.changePct}%` : '',
+      }));
+    }
+    case 'get_rank': {
+      const m = args.market === 'us' ? 'us' : 'cn';
+      const dir = args.dir === 'down' ? 'down' : 'up';
+      const fn = m === 'us' ? getRankUS : getRankCN;
+      return cached(`rank:${m}:${dir}`, m === 'us' ? 90000 : 30000, () => fn(dir));
+    }
+    case 'get_overview': {
+      const m = args.market === 'us' ? 'us' : 'cn';
+      const fn = m === 'us' ? getOverviewUS : getOverviewCN;
+      return cached(`overview:${m}`, 60000, fn);
+    }
+    case 'get_news':
+      return cached('news', 180000, () => getNews());
+    case 'search_stock':
+      return cached(`s:${args.query}`, 300000, () => searchStocks(String(args.query || '').slice(0, 20)));
+    default:
+      throw new Error(`未知工具: ${name}`);
+  }
+}
+
+function maskKey(k) {
+  if (!k) return '';
+  return k.length > 8 ? `${k.slice(0, 4)}****${k.slice(-4)}` : '****';
+}
+
+function writeLLMConfig(cfg) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tmp = LLM_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+  fs.renameSync(tmp, LLM_FILE);
+}
+
+// 测试当前配置能否连通（发一条极短消息，不带工具）
+async function testLLMConfig() {
+  const cfg = getLLMConfig();
+  if (!cfg.apiKey) return { ok: false, message: '尚未填写 API Key' };
+  try {
+    const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+      body: JSON.stringify({
+        model: cfg.model,
+        messages: [{ role: 'user', content: '只需回复两个字：OK' }],
+        max_tokens: 16,
+        temperature: 0,
+      }),
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!res.ok) {
+      return { ok: false, message: `HTTP ${res.status}: ${(await res.text()).slice(0, 200)}` };
+    }
+    const j = await res.json();
+    const reply = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || '';
+    return { ok: true, message: `连接成功，${cfg.model} 回复：${reply.slice(0, 30) || '(空)'}` };
+  } catch (e) {
+    return { ok: false, message: e.message };
+  }
+}
+
+function llmSystemPrompt() {
+  const now = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', dateStyle: 'full', timeStyle: 'short' }).format(new Date());
+  return `你是一个股票行情分析助手，嵌在用户自建的行情看板网站里。当前北京时间：${now}。
+
+规则：
+1. 回答必须基于工具返回的实时数据，需要数据时先调用工具。绝不编造价格、涨跌幅等数字；数据里没有的信息就明说没有。
+2. A股代码带 sh/sz 前缀（如 sh600519 贵州茅台、sh000001 上证指数、sz399006 创业板指）；美股用代码（AAPL）、指数用 ^DJI 道琼斯 / ^IXIC 纳斯达克 / ^GSPC 标普500。不确定个股代码时先用 search_stock 查。
+3. 分析要言之有物：结合涨跌家数、板块资金流向、新闻等多维度，先给结论再给依据。
+4. 用简体中文回答，Markdown 格式（可用加粗、列表，不要用表格）。保持简洁，别堆砌所有数字。
+5. 数据可能有延迟，你的分析不构成投资建议——只需在明显给出操作倾向时简短提示一次，不必每条回答都加免责声明。`;
+}
+
+async function llmComplete(cfg, messages) {
+  const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
+    body: JSON.stringify({ model: cfg.model, messages, tools: LLM_TOOLS, tool_choice: 'auto', temperature: 0.3 }),
+    signal: AbortSignal.timeout(120000),
+  });
+  if (!res.ok) {
+    const body = (await res.text()).slice(0, 300);
+    throw new Error(`LLM 接口返回 ${res.status}: ${body}`);
+  }
+  const j = await res.json();
+  if (!j.choices || !j.choices[0]) throw new Error('LLM 返回格式异常');
+  return j.choices[0].message;
+}
+
+// ---------- 对话会话存储（服务器端，跨设备共享） ----------
+const CHATS_FILE = path.join(DATA_DIR, 'chats.json');
+
+function readChats() {
+  try { return JSON.parse(fs.readFileSync(CHATS_FILE, 'utf8')); } catch { return { sessions: [] }; }
+}
+function writeChats(data) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tmp = CHATS_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(data, null, 2));
+  fs.renameSync(tmp, CHATS_FILE);
+}
+
+function sseSend(res, obj) {
+  res.write(`data: ${JSON.stringify(obj)}\n\n`);
+}
+
+async function handleChat(req, res, body) {
+  const { sessionId, message } = JSON.parse(body);
+  const text = String(message || '').trim().slice(0, 2000);
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-store',
+    Connection: 'keep-alive',
+  });
+  const cfg = getLLMConfig();
+  try {
+    if (!cfg.apiKey) {
+      sseSend(res, { type: 'error', message: '尚未配置模型 API Key——点击左侧「⚙ 模型设置」，选择服务商并填入 Key 即可使用。' });
+      return res.end();
+    }
+    if (!text) { sseSend(res, { type: 'error', message: '消息为空' }); return res.end(); }
+
+    const store = readChats();
+    let session = store.sessions.find((s) => s.id === sessionId);
+    if (!session) {
+      session = { id: sessionId || `c${Date.now()}`, title: '', createdAt: Date.now(), messages: [] };
+      store.sessions.unshift(session);
+    }
+    if (!session.title) session.title = text.slice(0, 24);
+    session.messages.push({ role: 'user', content: text });
+    session.updatedAt = Date.now();
+    writeChats(store);
+
+    // 上下文：系统提示 + 最近12条历史（含刚追加的这条用户消息）
+    const convo = [
+      { role: 'system', content: llmSystemPrompt() },
+      ...session.messages.slice(-12).map((m) => ({ role: m.role, content: m.content })),
+    ];
+
+    let answer = '';
+    for (let round = 0; round < 6; round++) {
+      const msg = await llmComplete(cfg, convo);
+      if (msg.tool_calls && msg.tool_calls.length) {
+        convo.push(msg);
+        for (const tc of msg.tool_calls) {
+          let args = {};
+          try { args = JSON.parse(tc.function.arguments || '{}'); } catch { /* 参数解析失败按空处理 */ }
+          sseSend(res, { type: 'tool', name: tc.function.name, args });
+          let result;
+          try {
+            result = await runLLMTool(tc.function.name, args);
+          } catch (e) {
+            result = { error: e.message };
+          }
+          convo.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: JSON.stringify(result).slice(0, 12000),
+          });
+        }
+        continue;
+      }
+      answer = msg.content || '';
+      break;
+    }
+    if (!answer) answer = '（分析轮次超限，请换个更具体的问题）';
+
+    session.messages.push({ role: 'assistant', content: answer });
+    session.updatedAt = Date.now();
+    const store2 = readChats();
+    const idx = store2.sessions.findIndex((s) => s.id === session.id);
+    if (idx >= 0) store2.sessions[idx] = session; else store2.sessions.unshift(session);
+    writeChats(store2);
+
+    sseSend(res, { type: 'answer', content: answer, sessionId: session.id, title: session.title });
+  } catch (e) {
+    console.error('[chat]', e.message);
+    sseSend(res, { type: 'error', message: e.message });
+  }
+  res.end();
+}
+
 // ---------- HTTP 服务 ----------
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -552,6 +791,18 @@ const MIME = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
 };
+
+function readBody(req, limit = 1e5) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+      if (body.length > limit) { req.destroy(); reject(new Error('body too large')); }
+    });
+    req.on('end', () => resolve(body));
+    req.on('error', reject);
+  });
+}
 
 function sendJSON(res, status, data) {
   const body = JSON.stringify(data);
@@ -633,6 +884,72 @@ const server = http.createServer(async (req, res) => {
       const fn = market === 'us' ? getRankUS : getRankCN;
       const ttl = market === 'us' ? 90000 : 30000;
       return sendJSON(res, 200, await cached(`rank:${market}:${dir}`, ttl, () => fn(dir)));
+    }
+    // LLM 配置（Key 只存服务器，GET 仅返回掩码）
+    if (p === '/api/llm-config') {
+      if (req.method === 'GET') {
+        const cfg = getLLMConfig();
+        return sendJSON(res, 200, {
+          baseUrl: cfg.baseUrl,
+          model: cfg.model,
+          configured: !!cfg.apiKey,
+          keyMask: maskKey(cfg.apiKey),
+        });
+      }
+      if (req.method === 'POST') {
+        const body = JSON.parse(await readBody(req));
+        const cur = getLLMConfig();
+        const baseUrl = String(body.baseUrl || '').trim().replace(/\/+$/, '').slice(0, 200);
+        const model = String(body.model || '').trim().slice(0, 100);
+        const apiKey = String(body.apiKey || '').trim().slice(0, 300) || cur.apiKey; // 留空则保留原 Key
+        if (!/^https?:\/\/.+/.test(baseUrl)) return sendJSON(res, 400, { error: '接口地址格式不正确' });
+        if (!model) return sendJSON(res, 400, { error: '模型名称不能为空' });
+        writeLLMConfig({ baseUrl, apiKey, model });
+        return sendJSON(res, 200, { ok: true, configured: !!apiKey, keyMask: maskKey(apiKey) });
+      }
+      return sendJSON(res, 405, { error: 'method not allowed' });
+    }
+    if (p === '/api/llm-config/test' && req.method === 'POST') {
+      return sendJSON(res, 200, await testLLMConfig());
+    }
+    // LLM 对话
+    if (p === '/api/chat' && req.method === 'POST') {
+      const body = await readBody(req);
+      return handleChat(req, res, body);
+    }
+    if (p === '/api/chat/sessions') {
+      if (req.method === 'GET') {
+        const store = readChats();
+        return sendJSON(res, 200, store.sessions.map((s) => ({
+          id: s.id,
+          title: s.title || '',
+          updatedAt: s.updatedAt || s.createdAt,
+          count: s.messages.length,
+        })));
+      }
+      if (req.method === 'POST') {
+        const store = readChats();
+        const session = { id: `c${Date.now()}${Math.random().toString(36).slice(2, 6)}`, title: '', createdAt: Date.now(), updatedAt: Date.now(), messages: [] };
+        store.sessions.unshift(session);
+        writeChats(store);
+        return sendJSON(res, 200, { id: session.id });
+      }
+      return sendJSON(res, 405, { error: 'method not allowed' });
+    }
+    const mSess = p.match(/^\/api\/chat\/sessions\/([\w-]+)$/);
+    if (mSess) {
+      const store = readChats();
+      const session = store.sessions.find((s) => s.id === mSess[1]);
+      if (req.method === 'GET') {
+        if (!session) return sendJSON(res, 404, { error: 'session not found' });
+        return sendJSON(res, 200, { id: session.id, title: session.title, messages: session.messages });
+      }
+      if (req.method === 'DELETE') {
+        store.sessions = store.sessions.filter((s) => s.id !== mSess[1]);
+        writeChats(store);
+        return sendJSON(res, 200, { ok: true });
+      }
+      return sendJSON(res, 405, { error: 'method not allowed' });
     }
     if (p === '/api/watchlist') {
       if (req.method === 'GET') return sendJSON(res, 200, readWatchlist());
