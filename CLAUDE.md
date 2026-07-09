@@ -24,6 +24,18 @@ ssh ubuntu-ts 'journalctl --user -u market -f'   # 看服务日志
 
 服务器 sudo 需要密码，所有运维用 `systemctl --user`，不要用系统级 systemd。
 
+### 公网访问（Tailscale Funnel + 口令）
+
+默认只在 Tailscale 私网可达。要给外人访问，用 Funnel 暴露到公网（自带 HTTPS，对方无需装客户端）。Funnel 只允许 `443/8443/10000` 三个端口，443 已被服务器上另一个 tailnet-only 应用（`127.0.0.1:18789`）占用，所以 **market 走 8443**。公网地址见 `ssh ubuntu-ts 'tailscale funnel status'` 或本机记忆（`.ts.net` 主机名不写进本文件）。
+
+```bash
+ssh ubuntu-ts 'tailscale funnel --bg --https=8443 3888'   # 开公网
+ssh ubuntu-ts 'tailscale funnel --https=8443 off'         # 关公网（私网不受影响）
+```
+首次开若报 Funnel 未授权，需在 admin console → Access controls 给节点加 `funnel` 属性（`nodeAttrs`），只能网页操作。
+
+**上公网前必须有鉴权**：`server.js` 有零依赖口令中间件，靠环境变量 `MARKET_PASSWORD` 开关——未设则完全不生效（私网直连行为不变），设置后未登录/API 返回 401，POST `/__login` 校验后下发 `market_auth` cookie（HttpOnly、SameSite=Lax、**无 Secure** 以兼容私网 http、30 天）。口令值存服务器 `~/.config/systemd/user/market.service.d/auth.conf`（systemd drop-in，chmod 600，**不进 git**，本文件也不写实际口令）。改口令：编辑该文件后 `systemctl --user daemon-reload && systemctl --user restart market`。
+
 ## 数据源的坑（都是实测踩出来的，别改回去）
 
 | 事实 | 后果 |
