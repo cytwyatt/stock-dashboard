@@ -1,7 +1,7 @@
 /**
  * 股票行情看板 - 本地服务
  * 无第三方依赖，Node 18+ 即可运行：node server.js
- * 数据来源：A股用腾讯行情/新浪财经；美股用 Yahoo Finance；新闻用新浪财经
+ * 数据来源：A股/港股用腾讯行情/新浪财经；美股用 Yahoo Finance；新闻用新浪财经
  */
 const http = require('http');
 const fs = require('fs');
@@ -68,14 +68,24 @@ const sanitizeCode = (s) => String(s).replace(/[^a-zA-Z0-9.^=-]/g, '').slice(0, 
 const fmtCNTime = (s) =>
   s && s.length >= 12 ? `${s.slice(4, 6)}-${s.slice(6, 8)} ${s.slice(8, 10)}:${s.slice(10, 12)}` : s;
 
+// 腾讯港股时间是斜杠格式："2026/07/09 16:08:11" -> "07-09 16:08"
+const fmtHKTime = (s) => {
+  const m = /^\d{4}\/(\d{2})\/(\d{2}) (\d{2}:\d{2})/.exec(s || '');
+  return m ? `${m[1]}-${m[2]} ${m[3]}` : s;
+};
+
 // ---------- Yahoo Finance（美股） ----------
 const US_INDICES = [
   { code: '^DJI', name: '道琼斯' },
   { code: '^IXIC', name: '纳斯达克' },
   { code: '^GSPC', name: '标普500' },
 ];
-// sh/sz/bj 前缀为A股（走腾讯），其余（^DJI、AAPL 等）走 Yahoo
+// sh/sz/bj 前缀为A股、hk 前缀为港股（都走腾讯），其余（^DJI、AAPL 等）走 Yahoo
 const isCNCode = (code) => /^(sh|sz|bj)\d{6}$/.test(code);
+// 港股个股 hk+5位数字（hk00700），指数为 hk+大写字母（hkHSI/hkHSCEI/hkHSTECH）
+const isHKCode = (code) => /^hk(\d{5}|[A-Z]+)$/.test(code);
+// 是否走腾讯行情（A股+港股共用 qt.gtimg.cn / ifzq.gtimg.cn）
+const isTXCode = (code) => isCNCode(code) || isHKCode(code);
 
 // Yahoo 限流敏感（按 UA+IP 分桶）：单独用简短 UA，所有请求串行排队，至少间隔 1 秒
 const YAHOO_UA = 'Mozilla/5.0';
@@ -207,12 +217,13 @@ async function getKlineUS(code, days, period = 'day') {
   return out;
 }
 
-// ---------- 指数实时报价（A股：腾讯，GBK 编码） ----------
+// ---------- 指数实时报价（A股/港股：腾讯，GBK 编码） ----------
 const CN_INDICES = ['sh000001', 'sz399001', 'sz399006', 'sh000300', 'sh000688'];
+const HK_INDICES = ['hkHSI', 'hkHSCEI', 'hkHSTECH'];
 
 async function getIndices(market) {
   if (market === 'us') return getIndicesUS();
-  const codes = CN_INDICES;
+  const codes = market === 'hk' ? HK_INDICES : CN_INDICES;
   const text = await fetchText(`https://qt.gtimg.cn/q=${codes.join(',')}`, {
     encoding: 'gbk',
   });
@@ -232,16 +243,16 @@ async function getIndices(market) {
       changePct: num(f[32]),
       high: num(f[33]),
       low: num(f[34]),
-      amount: num(f[37]), // 成交额（万元）
-      time: fmtCNTime(f[30]),
+      amount: num(f[37]), // 成交额（A股：万元；港股：元）
+      time: market === 'hk' ? fmtHKTime(f[30]) : fmtCNTime(f[30]),
     });
   }
   return out;
 }
 
-// ---------- 分时数据（A股：腾讯 / 美股：Yahoo） ----------
+// ---------- 分时数据（A股/港股：腾讯 / 美股：Yahoo） ----------
 async function getMinute(code) {
-  if (!isCNCode(code)) return getMinuteUS(code);
+  if (!isTXCode(code)) return getMinuteUS(code);
   const j = JSON.parse(
     await fetchText(
       `https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=${code}`
@@ -264,10 +275,12 @@ async function getMinute(code) {
   return { code, date, prevClose, points };
 }
 
-// ---------- K线数据（A股：腾讯 / 美股：Yahoo，period: day/week/month） ----------
+// ---------- K线数据（A股/港股：腾讯 / 美股：Yahoo，period: day/week/month） ----------
 async function getKline(code, days = 90, period = 'day') {
-  if (!isCNCode(code)) return getKlineUS(code, days, period);
-  const api = `https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${code},${period},,,${days},qfq`;
+  if (!isTXCode(code)) return getKlineUS(code, days, period);
+  // 港股要走 hkfqkline 才有前复权数据（fqkline 对 hk 代码只返回未复权）
+  const ep = isHKCode(code) ? 'hkfqkline' : 'fqkline';
+  const api = `https://web.ifzq.gtimg.cn/appstock/app/${ep}/get?param=${code},${period},,,${days},qfq`;
   const j = JSON.parse(await fetchText(api));
   const node = j.data && j.data[code];
   if (!node) throw new Error('no kline data');
@@ -347,9 +360,37 @@ async function getRankUS(dir, count = 20) {
   }));
 }
 
+// 港股涨跌榜（新浪）。num 上限60且接口无质量筛选：翻页多取几页，
+// 过滤掉仙股/无量异动（价<1港元或成交额<2000万），凑够 count 为止
+async function getRankHK(dir, count = 20) {
+  const asc = dir === 'down' ? 1 : 0;
+  const out = [];
+  for (let page = 1; page <= 3 && out.length < count; page++) {
+    const url = `https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHKStockData?page=${page}&num=60&sort=changepercent&asc=${asc}&node=qbgg_hk`;
+    const j = JSON.parse(
+      await fetchText(url, { referer: 'https://vip.stock.finance.sina.com.cn/mkt/' })
+    );
+    if (!Array.isArray(j) || !j.length) break;
+    for (const s of j) {
+      const price = num(s.lasttrade);
+      if (price < 1 || num(s.amount) < 2e7) continue;
+      out.push({
+        code: 'hk' + s.symbol,
+        name: s.name,
+        price,
+        change: num(s.pricechange),
+        changePct: num(s.changepercent),
+        amount: num(s.amount), // 港元
+      });
+      if (out.length >= count) break;
+    }
+  }
+  return out;
+}
+
 // ---------- 个股详情报价 ----------
 async function getQuote(code) {
-  if (!isCNCode(code)) {
+  if (!isTXCode(code)) {
     const r = await yahooChart(code, '1d', '5m');
     const m = r.meta;
     const prev = m.chartPreviousClose || m.previousClose || 0;
@@ -377,6 +418,30 @@ async function getQuote(code) {
   const m = text.match(new RegExp(`v_${code}="([^"]*)"`));
   if (!m) throw new Error('no quote for ' + code);
   const f = m[1].split('~');
+  if (isHKCode(code)) {
+    // 港股字段与A股大体一致，但单位不同：成交量是股（非手）、成交额是港元（非万元）；
+    // f[38] 换手率恒为0、f[46] 是英文名（非市净率）——不返回这两项；盘口量恒为0，也不返回
+    return {
+      code,
+      market: 'hk',
+      name: f[1],
+      price: num(f[3]),
+      prevClose: num(f[4]),
+      open: num(f[5]),
+      change: num(f[31]),
+      changePct: num(f[32]),
+      high: num(f[33]),
+      low: num(f[34]),
+      volume: num(f[36]), // 股
+      amount: num(f[37]), // 港元
+      pe: num(f[39]),
+      amplitude: num(f[43]),
+      mktcap: num(f[45]) * 1e8, // 亿 -> 港元
+      week52High: num(f[48]),
+      week52Low: num(f[49]),
+      time: fmtHKTime(f[30]),
+    };
+  }
   // 五档盘口：f[9..18] 买一~买五 价/量，f[19..28] 卖一~卖五 价/量（量单位：手）
   const level5 = (start) =>
     [0, 1, 2, 3, 4].map((i) => [num(f[start + i * 2]), num(f[start + i * 2 + 1])]);
@@ -404,22 +469,22 @@ async function getQuote(code) {
   };
 }
 
-// 批量简要报价（自选股列表用）
+// 批量简要报价（自选股列表用）。A股+港股可以合并在一次腾讯请求里
 async function getQuotes(codes) {
-  const cn = codes.filter(isCNCode);
-  const us = codes.filter((c) => !isCNCode(c));
+  const tx = codes.filter(isTXCode);
+  const us = codes.filter((c) => !isTXCode(c));
   const out = new Map();
   const jobs = [];
-  if (cn.length) {
+  if (tx.length) {
     jobs.push(
-      fetchText(`https://qt.gtimg.cn/q=${cn.join(',')}`, { encoding: 'gbk' }).then((text) => {
-        for (const code of cn) {
+      fetchText(`https://qt.gtimg.cn/q=${tx.join(',')}`, { encoding: 'gbk' }).then((text) => {
+        for (const code of tx) {
           const m = text.match(new RegExp(`v_${code}="([^"]*)"`));
           if (!m) continue;
           const f = m[1].split('~');
           out.set(code, {
             code,
-            market: 'cn',
+            market: isHKCode(code) ? 'hk' : 'cn',
             name: f[1],
             price: num(f[3]),
             change: num(f[31]),
@@ -458,11 +523,15 @@ async function searchStocks(q) {
       if (mkt === 'sh' || mkt === 'sz' || mkt === 'bj') {
         return { code: mkt + code, name: decode(name), market: 'cn' };
       }
+      if (mkt === 'hk') {
+        // 港股代码为5位数字（00700）；type=GP 已过滤掉涡轮牛熊证（QZ）
+        return { code: 'hk' + code, name: decode(name), market: 'hk' };
+      }
       if (mkt === 'us') {
         // 美股代码带交易所后缀，如 aapl.oq -> AAPL
         return { code: code.split('.')[0].toUpperCase(), name: decode(name), market: 'us' };
       }
-      return null; // 港股等暂不支持
+      return null;
     })
     .filter(Boolean)
     .slice(0, 10);
@@ -559,12 +628,12 @@ function getLLMConfig() {
 
 // 提供给 LLM 的工具集（复用现有数据函数，全部走缓存）
 const LLM_TOOLS = [
-  { name: 'get_indices', description: '获取大盘指数实时行情。market=cn 返回上证/深成/创业板/沪深300/科创50；market=us 返回道琼斯/纳斯达克/标普500', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'us'] } }, required: ['market'] } },
-  { name: 'get_quote', description: '获取单只股票的详细实时报价（价格、涨跌幅、成交量额、换手率、市盈率、市值、五档盘口等）。A股代码格式如 sh600519/sz300750，美股代码如 AAPL/TSLA，也支持 ^VIX、GC=F 黄金、BTC-USD 等', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
+  { name: 'get_indices', description: '获取大盘指数实时行情。market=cn 返回上证/深成/创业板/沪深300/科创50；market=hk 返回恒生指数/国企指数/恒生科技；market=us 返回道琼斯/纳斯达克/标普500', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] } }, required: ['market'] } },
+  { name: 'get_quote', description: '获取单只股票的详细实时报价（价格、涨跌幅、成交量额、换手率、市盈率、市值、五档盘口等）。A股代码格式如 sh600519/sz300750，港股如 hk00700，美股代码如 AAPL/TSLA，也支持 ^VIX、GC=F 黄金、BTC-USD 等', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
   { name: 'get_kline', description: '获取股票或指数的K线历史（日K/周K/月K，最近最多40根，含开高低收和成交量）', parameters: { type: 'object', properties: { code: { type: 'string' }, period: { type: 'string', enum: ['day', 'week', 'month'] } }, required: ['code'] } },
   { name: 'get_intraday', description: '获取当日分时走势（抽样点位），可用于判断盘中走势形态', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
   { name: 'get_sectors', description: '获取A股31个申万行业板块的涨跌幅、主力资金净流入（亿元）和领涨股，可判断市场热点和资金流向', parameters: { type: 'object', properties: {} } },
-  { name: 'get_rank', description: '获取涨幅榜或跌幅榜个股。market=cn 沪深两市，market=us 美股', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'us'] }, dir: { type: 'string', enum: ['up', 'down'] } }, required: ['market', 'dir'] } },
+  { name: 'get_rank', description: '获取涨幅榜或跌幅榜个股。market=cn 沪深两市，market=hk 港股，market=us 美股', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] }, dir: { type: 'string', enum: ['up', 'down'] } }, required: ['market', 'dir'] } },
   { name: 'get_overview', description: '获取市场概况。market=cn 返回涨跌家数、涨停跌停数、两市成交额；market=us 返回VIX恐慌指数、美债收益率、美元指数、黄金、原油、比特币', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'us'] } }, required: ['market'] } },
   { name: 'get_news', description: '获取最新财经新闻标题列表（新浪财经滚动要闻）', parameters: { type: 'object', properties: {} } },
   { name: 'search_stock', description: '按名称/代码/拼音搜索股票，返回股票代码。回答个股问题前如果不确定代码，先用这个工具查', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
@@ -573,7 +642,7 @@ const LLM_TOOLS = [
 async function runLLMTool(name, args) {
   switch (name) {
     case 'get_indices': {
-      const m = args.market === 'us' ? 'us' : 'cn';
+      const m = args.market === 'us' || args.market === 'hk' ? args.market : 'cn';
       return cached(`idx:${m}`, 15000, () => getIndices(m));
     }
     case 'get_quote': {
@@ -604,9 +673,9 @@ async function runLLMTool(name, args) {
       }));
     }
     case 'get_rank': {
-      const m = args.market === 'us' ? 'us' : 'cn';
+      const m = args.market === 'us' || args.market === 'hk' ? args.market : 'cn';
       const dir = args.dir === 'down' ? 'down' : 'up';
-      const fn = m === 'us' ? getRankUS : getRankCN;
+      const fn = m === 'us' ? getRankUS : m === 'hk' ? getRankHK : getRankCN;
       return cached(`rank:${m}:${dir}`, m === 'us' ? 90000 : 30000, () => fn(dir));
     }
     case 'get_overview': {
@@ -668,7 +737,7 @@ function llmSystemPrompt() {
 
 规则：
 1. 回答必须基于工具返回的实时数据，需要数据时先调用工具。绝不编造价格、涨跌幅等数字；数据里没有的信息就明说没有。
-2. A股代码带 sh/sz 前缀（如 sh600519 贵州茅台、sh000001 上证指数、sz399006 创业板指）；美股用代码（AAPL）、指数用 ^DJI 道琼斯 / ^IXIC 纳斯达克 / ^GSPC 标普500。不确定个股代码时先用 search_stock 查。
+2. A股代码带 sh/sz 前缀（如 sh600519 贵州茅台、sh000001 上证指数、sz399006 创业板指）；港股带 hk 前缀+5位数字（如 hk00700 腾讯控股，指数 hkHSI 恒生指数 / hkHSCEI 国企指数 / hkHSTECH 恒生科技）；美股用代码（AAPL）、指数用 ^DJI 道琼斯 / ^IXIC 纳斯达克 / ^GSPC 标普500。不确定个股代码时先用 search_stock 查。
 3. 分析要言之有物：结合涨跌家数、板块资金流向、新闻等多维度，先给结论再给依据。
 4. 用简体中文回答，Markdown 格式（可用加粗、列表，不要用表格）。保持简洁，别堆砌所有数字。
 5. 数据可能有延迟，你的分析不构成投资建议——只需在明显给出操作倾向时简短提示一次，不必每条回答都加免责声明。`;
@@ -938,12 +1007,13 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (p === '/api/indices') {
-      const market = u.searchParams.get('market') === 'us' ? 'us' : 'cn';
+      const q = u.searchParams.get('market');
+      const market = q === 'us' || q === 'hk' ? q : 'cn';
       return sendJSON(res, 200, await cached(`idx:${market}`, 15000, () => getIndices(market)));
     }
     if (p === '/api/minute') {
       const code = sanitizeCode(u.searchParams.get('code') || 'sh000001');
-      const ttl = isCNCode(code) ? 30000 : 60000;
+      const ttl = isTXCode(code) ? 30000 : 60000;
       return sendJSON(res, 200, await cached(`min:${code}`, ttl, () => getMinute(code)));
     }
     if (p === '/api/kline') {
@@ -957,9 +1027,10 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(res, 200, await cached('sectors', 30000, getSectors));
     }
     if (p === '/api/rank') {
-      const market = u.searchParams.get('market') === 'us' ? 'us' : 'cn';
+      const q = u.searchParams.get('market');
+      const market = q === 'us' || q === 'hk' ? q : 'cn';
       const dir = u.searchParams.get('dir') === 'down' ? 'down' : 'up';
-      const fn = market === 'us' ? getRankUS : getRankCN;
+      const fn = market === 'us' ? getRankUS : market === 'hk' ? getRankHK : getRankCN;
       const ttl = market === 'us' ? 90000 : 30000;
       return sendJSON(res, 200, await cached(`rank:${market}:${dir}`, ttl, () => fn(dir)));
     }
@@ -1046,7 +1117,7 @@ const server = http.createServer(async (req, res) => {
               .map((s) => ({
                 code: sanitizeCode(s.code),
                 name: String(s.name || '').slice(0, 40),
-                market: s.market === 'us' ? 'us' : 'cn',
+                market: s.market === 'us' || s.market === 'hk' ? s.market : 'cn',
               }))
               .filter((s) => s.code);
             writeWatchlist(list);
@@ -1105,7 +1176,7 @@ const server = http.createServer(async (req, res) => {
 
 // ---------- 盘中缓存预热：后台定时刷新热点数据，用户请求永远命中热缓存 ----------
 function isMarketOpenSrv(market) {
-  const tz = market === 'us' ? 'America/New_York' : 'Asia/Shanghai';
+  const tz = market === 'us' ? 'America/New_York' : market === 'hk' ? 'Asia/Hong_Kong' : 'Asia/Shanghai';
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: tz,
     weekday: 'short',
@@ -1116,7 +1187,10 @@ function isMarketOpenSrv(market) {
   const get = (t) => parts.find((x) => x.type === t).value;
   if (get('weekday') === 'Sat' || get('weekday') === 'Sun') return false;
   const mins = parseInt(get('hour'), 10) * 60 + parseInt(get('minute'), 10);
-  return market === 'us' ? mins >= 565 && mins <= 965 : mins >= 555 && mins <= 905;
+  // A股 09:15-15:05；港股 09:15-16:15（16:00收盘）；美股 09:25-16:05（美东）
+  if (market === 'us') return mins >= 565 && mins <= 965;
+  if (market === 'hk') return mins >= 555 && mins <= 975;
+  return mins >= 555 && mins <= 905;
 }
 
 // key/ttl 与路由保持一致，预热的数据能被请求直接命中
@@ -1131,6 +1205,13 @@ function warmCaches() {
     warm('rank:cn:up', 30000, () => getRankCN('up'));
     warm('rank:cn:down', 30000, () => getRankCN('down'));
     warm('overview:cn', 60000, getOverviewCN);
+    warm('news', 180000, () => getNews());
+  }
+  if (isMarketOpenSrv('hk')) {
+    warm('idx:hk', 15000, () => getIndices('hk'));
+    warm('min:hkHSI', 30000, () => getMinute('hkHSI'));
+    warm('rank:hk:up', 30000, () => getRankHK('up'));
+    warm('rank:hk:down', 30000, () => getRankHK('down'));
     warm('news', 180000, () => getNews());
   }
   if (isMarketOpenSrv('us')) {

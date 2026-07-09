@@ -531,6 +531,8 @@ a { color: inherit; text-decoration: none; }
   .chat-bubble { max-width: 92%; font-size: 16px; }
   .chat-inputbar textarea { font-size: 16px; }
   .logo { font-size: 15px; }
+  /* 5 个 tab（A股/港股/美股/自选/AI）要在 375px 宽度里和 logo 同行放下 */
+  .tab { padding: 5px 10px; font-size: 13px; }
   .update-time { display: none; }
   .index-cards {
     display: flex;

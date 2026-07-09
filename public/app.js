@@ -2,11 +2,13 @@
 const $ = (sel) => document.querySelector(sel);
 
 const state = {
-  market: 'cn',        // cn | us | watch
+  market: 'cn',        // cn | hk | us | watch | llm
   indices: [],
   activeCode: null,    // 当前选中的指数
   chartType: 'minute', // minute | day | week | month
 };
+
+const MARKET_LABELS = { cn: 'A股', hk: '港股', us: '美股' };
 
 /* ---------- 自选股（存服务器，所有设备共享） ---------- */
 const WATCH_KEY = 'watchlist'; // 旧版 localStorage key，仅用于一次性迁移
@@ -70,7 +72,7 @@ async function api(path) {
 
 /* ---------- 交易时段判断（按市场时区，含少量缓冲） ---------- */
 function isMarketOpen(market) {
-  const tz = market === 'us' ? 'America/New_York' : 'Asia/Shanghai';
+  const tz = market === 'us' ? 'America/New_York' : market === 'hk' ? 'Asia/Hong_Kong' : 'Asia/Shanghai';
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: tz,
     weekday: 'short',
@@ -82,8 +84,10 @@ function isMarketOpen(market) {
   const wd = get('weekday');
   if (wd === 'Sat' || wd === 'Sun') return false;
   const mins = parseInt(get('hour'), 10) * 60 + parseInt(get('minute'), 10);
-  // A股 09:15-15:05（北京时间）；美股 09:25-16:05（美东时间）
-  return market === 'us' ? mins >= 565 && mins <= 965 : mins >= 555 && mins <= 905;
+  // A股 09:15-15:05（北京时间）；港股 09:15-16:15；美股 09:25-16:05（美东时间）
+  if (market === 'us') return mins >= 565 && mins <= 965;
+  if (market === 'hk') return mins >= 555 && mins <= 975;
+  return mins >= 555 && mins <= 905;
 }
 
 /* ---------- 指数卡片 ---------- */
@@ -374,9 +378,12 @@ function setChartType(type) {
 
 /* ---------- 市场概况 ---------- */
 async function loadOverview() {
-  const d = await api(`/api/overview?market=${state.market}`);
+  const market = state.market;
+  if (market !== 'cn' && market !== 'us') return; // 港股暂无概况数据
+  const d = await api(`/api/overview?market=${market}`);
+  if (market !== state.market) return; // 响应回来前切了 tab，丢弃
   const el = $('#overviewContent');
-  if (state.market === 'cn') {
+  if (market === 'cn') {
     $('#overviewTitle').textContent = '市场概况 · 沪深两市';
     const upW = d.total ? ((d.up / d.total) * 100).toFixed(1) : 50;
     const yi = d.turnover / 1e4; // 万元 -> 亿
@@ -609,7 +616,7 @@ function fmtBig(v) {
 function openStock(code, name = '') {
   modal.code = code;
   modal.name = name;
-  modal.market = /^(sh|sz|bj)\d{6}$/.test(code) ? 'cn' : 'us';
+  modal.market = /^(sh|sz|bj)\d{6}$/.test(code) ? 'cn' : /^hk/.test(code) ? 'hk' : 'us';
   modal.chartType = 'minute';
   $('#mName').textContent = name || code;
   $('#mCode').textContent = code.toUpperCase();
@@ -668,6 +675,16 @@ async function loadModalQuote() {
           ['换手率', q.turnoverRate + '%'], ['振幅', q.amplitude + '%'],
           ['市盈率', q.pe || '--'], ['市净率', q.pb || '--'],
           ['总市值', fmtBig(q.mktcap)],
+        ]
+      : q.market === 'hk'
+      ? [
+          ['今开', q.open.toFixed(2)], ['昨收', q.prevClose.toFixed(2)],
+          ['最高', q.high.toFixed(2)], ['最低', q.low.toFixed(2)],
+          ['成交量', fmtBig(q.volume) + '股'], ['成交额', fmtBig(q.amount)],
+          ['市盈率', q.pe || '--'], ['振幅', q.amplitude + '%'],
+          ['总市值', q.mktcap ? fmtBig(q.mktcap) : '--'],
+          ['52周最高', q.week52High ? q.week52High.toFixed(2) : '--'],
+          ['52周最低', q.week52Low ? q.week52Low.toFixed(2) : '--'],
         ]
       : [
           ['昨收', q.prevClose.toFixed(2)],
@@ -758,7 +775,7 @@ function renderSearchResults(list) {
     <div class="search-item" data-code="${s.code}" data-name="${s.name}">
       <span class="s-name">${s.name}</span>
       <span class="s-code">${s.code.toUpperCase()}</span>
-      <span class="s-badge">${s.market === 'cn' ? 'A股' : '美股'}</span>
+      <span class="s-badge">${MARKET_LABELS[s.market] || '美股'}</span>
     </div>`
     )
     .join('');
@@ -803,10 +820,11 @@ function switchMarket(market) {
   document.querySelectorAll('#marketTabs .tab').forEach((b) =>
     b.classList.toggle('active', b.dataset.market === market)
   );
-  const isQuote = market === 'cn' || market === 'us';
+  const isQuote = market === 'cn' || market === 'hk' || market === 'us';
   $('#indexSection').style.display = isQuote ? '' : 'none';
   $('#chartSection').style.display = isQuote ? '' : 'none';
-  $('#overviewSection').style.display = isQuote ? '' : 'none';
+  // 市场概况仅A股/美股有数据源
+  $('#overviewSection').style.display = market === 'cn' || market === 'us' ? '' : 'none';
   $('#rankSection').style.display = isQuote ? '' : 'none';
   $('#watchSection').style.display = market === 'watch' ? '' : 'none';
   $('#chatSection').style.display = market === 'llm' ? '' : 'none';
@@ -1190,7 +1208,7 @@ refreshAll();
 setInterval(() => {
   const open =
     state.market === 'watch'
-      ? isMarketOpen('cn') || isMarketOpen('us')
+      ? isMarketOpen('cn') || isMarketOpen('hk') || isMarketOpen('us')
       : isMarketOpen(state.market);
   if (Date.now() - lastQuotesAt >= (open ? 30000 : 300000)) refreshQuotes();
 }, 5000);
