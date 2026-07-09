@@ -114,6 +114,14 @@
             <button class="icon-btn" id="llmConfigBtnM" title="模型设置">⚙</button>
           </div>
           <div class="chat-msgs" id="chatMsgs"></div>
+          <div class="chat-context" id="chatContext" style="display:none">
+            <span class="chat-context-icon" aria-hidden="true">✨</span>
+            <div class="chat-context-copy">
+              <strong id="chatContextName"></strong>
+              <span id="chatContextMeta"></span>
+            </div>
+            <button type="button" id="chatContextRemove" aria-label="移除股票上下文" title="移除股票上下文">✕</button>
+          </div>
           <div class="chat-inputbar">
             <textarea id="chatInput" rows="1" placeholder="问点股票问题，如：今天大盘怎么样？"></textarea>
             <button id="chatSend">发送</button>

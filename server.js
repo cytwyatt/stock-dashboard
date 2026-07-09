@@ -929,7 +929,7 @@ async function handleChat(res, payload) {
     const cfg = getLLMConfig();
     try {
       if (!cfg.apiKey) {
-        sseSend(res, { type: 'error', message: '尚未配置模型 API Key——点击左侧「⚙ 模型设置」，选择服务商并填入 Key 即可使用。' });
+        sseSend(res, { type: 'error', message: '尚未配置模型 API Key——点击「⚙ 模型设置」，选择服务商并填入 Key 即可使用。' });
         return res.end();
       }
 

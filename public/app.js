@@ -610,25 +610,43 @@ async function loadWatch() {
     if (mutation !== watchMutation) return;
     watchList = latest;
   } catch (e) { console.error(e); }
+  if (mutation !== watchMutation || state.market !== 'watch') return;
   const list = getWatch();
   const table = $('#watchTable');
-  $('#watchEmpty').style.display = list.length ? 'none' : '';
+  $('#watchEmpty').style.display = list.length ? 'none' : 'block';
   $('#updateTime').textContent = list.length ? `共 ${list.length} 只` : '';
   if (!list.length) { table.innerHTML = ''; return; }
-  const quotes = await api(`/api/quotes?codes=${encodeURIComponent(list.map((s) => s.code).join(','))}`);
+  let quotes = [];
+  try {
+    quotes = await api(`/api/quotes?codes=${encodeURIComponent(list.map((s) => s.code).join(','))}`);
+  } catch (e) { console.error(e); }
+  if (mutation !== watchMutation || state.market !== 'watch') return;
   const byCode = new Map(quotes.map((q) => [q.code, q]));
   table.innerHTML =
-    `<tr><th>名称</th><th>最新价</th><th>涨跌幅</th><th></th></tr>` +
+    `<tr><th>名称</th><th>最新价</th><th>涨跌幅</th><th>操作</th></tr>` +
     list
       .map((s) => {
         const q = byCode.get(s.code);
-        const name = (q && q.name) || s.name;
+        const name = (q && q.name) || s.name || s.code.toUpperCase();
+        const market = (q && q.market) || (/^(sh|sz|bj)\d{6}$/.test(s.code) ? 'cn' : /^hk/.test(s.code) ? 'hk' : 'us');
         return `
       <tr data-code="${escapeHtml(s.code)}" data-name="${escapeHtml(name)}">
         <td><div class="stock-name">${escapeHtml(name)}</div><div class="stock-code">${escapeHtml(s.code.toUpperCase())}</div></td>
         <td>${q ? q.price.toFixed(2) : '--'}</td>
         <td class="${q ? colorCls(q.changePct) : ''}">${q ? fmtPct(q.changePct) : '--'}</td>
-        <td><button class="del-btn" data-del="${escapeHtml(s.code)}" title="移除">✕</button></td>
+        <td><div class="watch-actions">
+          <button type="button" class="ask-ai-btn"
+            data-ai-code="${escapeHtml(s.code)}"
+            data-ai-name="${escapeHtml((q && q.name) || '')}"
+            data-ai-display-name="${escapeHtml(name)}"
+            data-ai-market="${escapeHtml(market)}"
+            title="向 AI 询问 ${escapeHtml(name)}"
+            aria-label="向 AI 询问 ${escapeHtml(name)}">
+            <span class="ask-ai-icon" aria-hidden="true">✨</span>
+            <span class="ask-ai-label">问 AI</span><span class="ask-ai-label-mobile">AI</span>
+          </button>
+          <button type="button" class="del-btn" data-del="${escapeHtml(s.code)}" title="移除" aria-label="从自选移除 ${escapeHtml(name)}">✕</button>
+        </div></td>
       </tr>`;
       })
       .join('');
@@ -639,6 +657,17 @@ async function loadWatch() {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleWatch({ code: btn.dataset.del });
+    })
+  );
+  table.querySelectorAll('.ask-ai-btn').forEach((btn) =>
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openChatWithStock({
+        code: btn.dataset.aiCode,
+        name: btn.dataset.aiName,
+        displayName: btn.dataset.aiDisplayName,
+        market: btn.dataset.aiMarket,
+      }).catch(console.error);
     })
   );
 }
@@ -857,7 +886,7 @@ async function loadNews() {
 }
 
 /* ---------- 市场切换 ---------- */
-function switchMarket(market) {
+async function switchMarket(market) {
   state.market = market;
   state.activeCode = null;
   document.querySelectorAll('#marketTabs .tab').forEach((b) =>
@@ -869,8 +898,8 @@ function switchMarket(market) {
   // 市场概况仅A股/美股有数据源
   $('#overviewSection').style.display = market === 'cn' || market === 'us' ? '' : 'none';
   $('#rankSection').style.display = isQuote ? '' : 'none';
-  $('#watchSection').style.display = market === 'watch' ? '' : 'none';
-  $('#chatSection').style.display = market === 'llm' ? '' : 'none';
+  $('#watchSection').style.display = market === 'watch' ? 'block' : 'none';
+  $('#chatSection').style.display = market === 'llm' ? 'block' : 'none';
   $('#newsSection').style.display = market === 'llm' ? 'none' : '';
   // 行业板块仅A股有数据
   $('#sectorSection').style.display = market === 'cn' ? '' : 'none';
@@ -880,7 +909,7 @@ function switchMarket(market) {
   );
   if (market === 'llm') {
     $('#updateTime').textContent = '';
-    initChat().catch(console.error);
+    await initChat();
     return;
   }
   // 立即清掉上一市场的榜单/概况——新数据可能要等上游几秒（冷缓存时），期间不能残留旧市场内容
@@ -914,7 +943,111 @@ function refreshAll() {
 }
 
 /* ---------- AI 问答 ---------- */
-const chat = { sessions: [], activeId: null, busy: false, inited: false, selectReq: 0 };
+const STOCK_AI_QUESTION = '请结合实时报价、分时走势和近期日 K，先判断当前趋势，再说明关键价位、主要风险和后续观察点。';
+const chat = {
+  sessions: [],
+  activeId: null,
+  busy: false,
+  selectReq: 0,
+  initPromise: null,
+  stockOpenReq: 0,
+  stockOpenChain: Promise.resolve(),
+  draftStock: null,
+  drafts: new Map(),
+};
+
+function resizeChatInput(input = $('#chatInput')) {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+}
+
+function renderChatContext() {
+  const el = $('#chatContext');
+  const stock = chat.draftStock;
+  if (!stock) {
+    el.style.display = 'none';
+    $('#chatContextName').textContent = '';
+    $('#chatContextMeta').textContent = '';
+    return;
+  }
+  const market = MARKET_LABELS[stock.market] || '股票';
+  $('#chatContextName').textContent = stock.displayName || stock.name || stock.code.toUpperCase();
+  $('#chatContextMeta').textContent = `${stock.code.toUpperCase()} · ${market} · 发送时获取最新行情`;
+  el.style.display = 'flex';
+}
+
+function saveChatDraft() {
+  if (!chat.activeId) return;
+  const text = $('#chatInput').value;
+  if (!text && !chat.draftStock) {
+    chat.drafts.delete(chat.activeId);
+    return;
+  }
+  chat.drafts.set(chat.activeId, {
+    text,
+    stock: chat.draftStock ? { ...chat.draftStock } : null,
+  });
+}
+
+function restoreChatDraft(id) {
+  const draft = chat.drafts.get(id);
+  $('#chatInput').value = draft ? draft.text : '';
+  chat.draftStock = draft && draft.stock ? { ...draft.stock } : null;
+  resizeChatInput();
+  renderChatContext();
+}
+
+function removeChatStockContext() {
+  const input = $('#chatInput');
+  if (chat.draftStock && input.value === chat.draftStock.initialText) input.value = '';
+  chat.draftStock = null;
+  resizeChatInput(input);
+  renderChatContext();
+  saveChatDraft();
+}
+
+function buildStockChatMessage(stock, question) {
+  const market = MARKET_LABELS[stock.market] || '股票';
+  const identity = stock.name
+    ? `${stock.name}（代码：${stock.code}，市场：${market}）`
+    : `代码：${stock.code}，市场：${market}`;
+  return `分析自选股 ${identity}。${question}`;
+}
+
+function openChatWithStock(stock) {
+  const req = ++chat.stockOpenReq;
+  chat.stockOpenChain = chat.stockOpenChain
+    .catch((e) => console.error(e))
+    .then(async () => {
+      if (req !== chat.stockOpenReq) return;
+      await switchMarket('llm');
+      if (req !== chat.stockOpenReq || state.market !== 'llm') return;
+
+      const input = $('#chatInput');
+      const active = chat.sessions.find((s) => s.id === chat.activeId);
+      const generatedDraftUntouched = chat.draftStock && input.value === chat.draftStock.initialText;
+      const hasCustomDraft = !!input.value.trim() && !generatedDraftUntouched;
+      // 无 Key/网络失败时消息只存在当前 DOM、不一定已落盘，也必须视为已使用会话。
+      const activeHasMessages = Number(active && active.count || 0) > 0 || !!$('#chatMsgs .chat-msg');
+      if (!active || activeHasMessages || chat.busy || hasCustomDraft) await newChatSession();
+      if (req !== chat.stockOpenReq || state.market !== 'llm') return;
+
+      const market = stock.market === 'us' || stock.market === 'hk' ? stock.market : 'cn';
+      chat.draftStock = {
+        code: stock.code,
+        name: stock.name || '',
+        displayName: stock.displayName || stock.name || stock.code.toUpperCase(),
+        market,
+        initialText: STOCK_AI_QUESTION,
+      };
+      input.value = STOCK_AI_QUESTION;
+      resizeChatInput(input);
+      renderChatContext();
+      saveChatDraft();
+      if (!window.matchMedia('(max-width: 768px)').matches) input.focus();
+    });
+  return chat.stockOpenChain;
+}
 
 // 极简 Markdown 渲染（加粗/代码/列表/标题/段落）
 function mdToHtml(src) {
@@ -990,14 +1123,19 @@ function renderChatSessions() {
 }
 
 async function selectChatSession(id) {
+  if (chat.activeId && chat.activeId !== id) saveChatDraft();
   const req = ++chat.selectReq;
+  const changed = chat.activeId !== id;
   chat.activeId = id;
+  if (changed) restoreChatDraft(id);
   renderChatSessions();
   const wrap = $('#chatMsgs');
   wrap.innerHTML = '';
   try {
     const d = await api(`/api/chat/sessions/${encodeURIComponent(id)}`);
     if (req !== chat.selectReq || id !== chat.activeId) return;
+    const session = chat.sessions.find((s) => s.id === id);
+    if (session) session.count = d.messages.length;
     if (!d.messages.length) {
       wrap.innerHTML = '<div class="chat-empty">问我任何股票问题：大盘走势、板块资金、个股分析、市场情绪……<br>回答基于看板的实时数据。</div>';
       return;
@@ -1009,15 +1147,24 @@ async function selectChatSession(id) {
 }
 
 async function newChatSession() {
-  const d = await fetch('/api/chat/sessions', { method: 'POST' }).then((r) => r.json());
+  const res = await fetch('/api/chat/sessions', { method: 'POST' });
+  if (!res.ok) throw new Error(`/api/chat/sessions -> ${res.status}`);
+  const d = await res.json();
   chat.sessions.unshift({ id: d.id, title: '', updatedAt: Date.now(), count: 0 });
   await selectChatSession(d.id);
+  return d.id;
 }
 
 async function deleteChatSession(id) {
   await fetch(`/api/chat/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
   chat.sessions = chat.sessions.filter((s) => s.id !== id);
+  chat.drafts.delete(id);
   if (chat.activeId === id) {
+    chat.activeId = null;
+    chat.draftStock = null;
+    $('#chatInput').value = '';
+    resizeChatInput();
+    renderChatContext();
     if (chat.sessions.length) await selectChatSession(chat.sessions[0].id);
     else await newChatSession();
   } else {
@@ -1026,15 +1173,25 @@ async function deleteChatSession(id) {
 }
 
 async function initChat() {
-  // 每次进入都刷新列表（可能在其他设备上新建过会话）
+  // 合并并发初始化，避免“问 AI”快速连点时重复创建空会话或选错会话。
+  if (chat.initPromise) return chat.initPromise;
+  const run = (async () => {
+    // 每次进入都刷新列表（可能在其他设备上新建过会话）
+    try {
+      chat.sessions = await api('/api/chat/sessions');
+    } catch (e) { chat.sessions = chat.sessions || []; }
+    if (!chat.sessions.length) return newChatSession();
+    if (!chat.activeId || !chat.sessions.find((s) => s.id === chat.activeId)) {
+      await selectChatSession(chat.sessions[0].id);
+    } else {
+      renderChatSessions();
+    }
+  })();
+  chat.initPromise = run;
   try {
-    chat.sessions = await api('/api/chat/sessions');
-  } catch (e) { chat.sessions = chat.sessions || []; }
-  if (!chat.sessions.length) return newChatSession();
-  if (!chat.activeId || !chat.sessions.find((s) => s.id === chat.activeId)) {
-    await selectChatSession(chat.sessions[0].id);
-  } else {
-    renderChatSessions();
+    return await run;
+  } finally {
+    if (chat.initPromise === run) chat.initPromise = null;
   }
 }
 
@@ -1052,14 +1209,20 @@ const TOOL_LABELS = {
 
 async function sendChat() {
   const input = $('#chatInput');
-  const text = input.value.trim();
-  if (!text || chat.busy || !chat.activeId) return;
+  const question = input.value.trim();
+  if (!question || chat.busy || !chat.activeId) return;
+  const text = chat.draftStock ? buildStockChatMessage(chat.draftStock, question) : question;
   const sessionId = chat.activeId;
   const viewReq = chat.selectReq;
   chat.busy = true;
   $('#chatSend').disabled = true;
   input.value = '';
-  input.style.height = 'auto';
+  resizeChatInput(input);
+  chat.draftStock = null;
+  chat.drafts.delete(sessionId);
+  renderChatContext();
+  const session = chat.sessions.find((s) => s.id === sessionId);
+  if (session) session.count = Math.max(1, Number(session.count || 0));
   const empty = $('#chatMsgs .chat-empty');
   if (empty) empty.remove();
   appendChatMsg('user', mdToHtml(text));
@@ -1193,7 +1356,7 @@ async function saveLLMConfig() {
 
 /* ---------- 事件绑定 & 定时刷新 ---------- */
 document.querySelectorAll('#marketTabs .tab').forEach((b) =>
-  b.addEventListener('click', () => switchMarket(b.dataset.market))
+  b.addEventListener('click', () => switchMarket(b.dataset.market).catch(console.error))
 );
 document.querySelectorAll('#chartSwitch .switch-btn').forEach((b) =>
   b.addEventListener('click', () => setChartType(b.dataset.type))
@@ -1234,10 +1397,21 @@ $('#searchInput').addEventListener('blur', () => {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') closeStock();
 });
-$('#chatNew').addEventListener('click', () => newChatSession().catch(console.error));
-$('#chatNewMobile').addEventListener('click', () => newChatSession().catch(console.error));
+$('#chatNew').addEventListener('click', async () => {
+  try {
+    if (chat.initPromise) await chat.initPromise;
+    await newChatSession();
+  } catch (e) { console.error(e); }
+});
+$('#chatNewMobile').addEventListener('click', async () => {
+  try {
+    if (chat.initPromise) await chat.initPromise;
+    await newChatSession();
+  } catch (e) { console.error(e); }
+});
 $('#chatSessSelect').addEventListener('change', (e) => selectChatSession(e.target.value));
 $('#chatSend').addEventListener('click', sendChat);
+$('#chatContextRemove').addEventListener('click', removeChatStockContext);
 $('#chatInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -1245,8 +1419,8 @@ $('#chatInput').addEventListener('keydown', (e) => {
   }
 });
 $('#chatInput').addEventListener('input', (e) => {
-  e.target.style.height = 'auto';
-  e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+  resizeChatInput(e.target);
+  saveChatDraft();
 });
 $('#llmConfigBtn').addEventListener('click', () => openLLMConfig().catch(console.error));
 $('#llmConfigBtnM').addEventListener('click', () => openLLMConfig().catch(console.error));

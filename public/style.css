@@ -245,6 +245,31 @@ a { color: inherit; text-decoration: none; }
 .rank-table td:first-child { text-align: left; }
 .stock-name { font-weight: 600; }
 .stock-code { color: var(--text-dim); font-size: 11px; }
+.watch-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
+.ask-ai-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-height: 30px;
+  border: 1px solid rgba(74, 158, 255, 0.45);
+  border-radius: 7px;
+  background: rgba(74, 158, 255, 0.1);
+  color: #8fc2ff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 8px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.ask-ai-btn:hover, .ask-ai-btn:focus-visible {
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.18);
+  color: #fff;
+  outline: none;
+}
+.ask-ai-label-mobile { display: none; }
 
 /* ---------- 新闻 ---------- */
 .news-list { list-style: none; }
@@ -351,6 +376,29 @@ a { color: inherit; text-decoration: none; }
 .chat-status .dot { animation: chatPulse 1s infinite; }
 @keyframes chatPulse { 50% { opacity: 0.3; } }
 .chat-empty { color: var(--text-dim); font-size: 13px; text-align: center; padding: 48px 16px; }
+.chat-context {
+  align-items: center;
+  gap: 9px;
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid rgba(74, 158, 255, 0.35);
+  border-radius: 9px;
+  background: rgba(74, 158, 255, 0.08);
+}
+.chat-context-icon { flex: 0 0 auto; }
+.chat-context-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; }
+.chat-context-copy strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.chat-context-copy span { color: var(--text-dim); font-size: 11px; }
+.chat-context button {
+  flex: 0 0 auto;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 5px 7px;
+  cursor: pointer;
+}
+.chat-context button:hover, .chat-context button:focus-visible { color: var(--text); outline: none; }
 .chat-inputbar { display: flex; gap: 8px; margin-top: 8px; align-items: flex-end; }
 .chat-inputbar textarea {
   flex: 1;
@@ -530,6 +578,14 @@ a { color: inherit; text-decoration: none; }
   .chat-mobile-bar { display: flex; }
   .chat-bubble { max-width: 92%; font-size: 16px; }
   .chat-inputbar textarea { font-size: 16px; }
+  #watchSection { padding-left: 8px; padding-right: 8px; }
+  #watchTable th, #watchTable td { padding-left: 4px; padding-right: 4px; }
+  #watchTable .stock-name { max-width: 92px; overflow: hidden; text-overflow: ellipsis; }
+  .ask-ai-btn { min-width: 44px; min-height: 40px; padding: 5px 7px; }
+  .ask-ai-icon, .ask-ai-label { display: none; }
+  .ask-ai-label-mobile { display: inline; }
+  .watch-actions .del-btn { min-width: 34px; min-height: 40px; padding: 2px 5px; }
+  .chat-context { padding: 7px 9px; }
   .logo { font-size: 15px; }
   /* 5 个 tab（A股/港股/美股/自选/AI）要在 375px 宽度里和 logo 同行放下 */
   .tab { padding: 5px 10px; font-size: 13px; }
