@@ -700,7 +700,8 @@ function openStock(code, name = '') {
     b.classList.toggle('active', b.dataset.type === 'minute')
   );
   updateHeartBtn();
-  $('#stockModal').style.display = '';
+  updateModalAskAIButton();
+  $('#stockModal').style.display = 'flex';
   if (!modal.chart) {
     modal.chart = echarts.init($('#mChart'));
     window.addEventListener('resize', () => modal.chart.resize());
@@ -714,6 +715,7 @@ function openStock(code, name = '') {
 function closeStock() {
   $('#stockModal').style.display = 'none';
   modal.code = null;
+  modal.req++;
 }
 
 function updateHeartBtn() {
@@ -724,12 +726,21 @@ function updateHeartBtn() {
   btn.title = on ? '移出自选' : '加入自选';
 }
 
+function updateModalAskAIButton() {
+  const target = modal.name || (modal.code && modal.code.toUpperCase()) || '这只股票';
+  const label = `向 AI 询问 ${target}`;
+  const btn = $('#mAskAI');
+  btn.title = label;
+  btn.setAttribute('aria-label', label);
+}
+
 async function loadModalQuote() {
   const q = await api(`/api/quote?code=${encodeURIComponent(modal.code)}`);
   if (q.code !== modal.code) return;
   modal.name = q.name;
   modal.market = q.market;
   $('#mName').textContent = q.name;
+  updateModalAskAIButton();
   $('#mPrice').textContent = q.price.toFixed(2);
   $('#mPrice').className = `modal-price ${colorCls(q.change)}`;
   $('#mChg').textContent = `${sign(q.change)}${q.change.toFixed(2)} · ${fmtPct(q.changePct)}`;
@@ -1011,7 +1022,7 @@ function buildStockChatMessage(stock, question) {
   const identity = stock.name
     ? `${stock.name}（代码：${stock.code}，市场：${market}）`
     : `代码：${stock.code}，市场：${market}`;
-  return `分析自选股 ${identity}。${question}`;
+  return `分析股票 ${identity}。${question}`;
 }
 
 function openChatWithStock(stock) {
@@ -1375,6 +1386,18 @@ $('#mHeart').addEventListener('click', () => {
   if (!modal.code) return;
   toggleWatch({ code: modal.code, name: modal.name, market: modal.market });
   updateHeartBtn();
+});
+$('#mAskAI').addEventListener('click', () => {
+  if (!modal.code) return;
+  // 先快照再关弹窗：报价尚未返回时也能使用入口，迟到响应不会改写 AI 上下文。
+  const stock = {
+    code: modal.code,
+    name: modal.name,
+    displayName: modal.name || modal.code.toUpperCase(),
+    market: modal.market,
+  };
+  closeStock();
+  openChatWithStock(stock).catch(console.error);
 });
 $('#searchInput').addEventListener('input', (e) => {
   clearTimeout(searchTimer);
