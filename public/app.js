@@ -954,7 +954,7 @@ function refreshAll() {
 }
 
 /* ---------- AI 问答 ---------- */
-const STOCK_AI_QUESTION = '请结合实时报价、分时走势和近期日 K，先判断当前趋势，再说明关键价位、主要风险和后续观察点。';
+const STOCK_AI_QUESTION = '请结合实时报价、分时走势、近期日 K 和最新个股/板块资讯分析。若当日涨跌显著，请先核实相关新闻并区分事实与推断；再判断当前趋势，说明关键价位、主要风险和后续观察点。';
 const chat = {
   sessions: [],
   activeId: null,
@@ -1066,6 +1066,12 @@ function mdToHtml(src) {
   let h = esc
     .replace(/```[\w]*\n?([\s\S]*?)```/g, (_, c) => `\x01pre${btoa(unescape(encodeURIComponent(c)))}\x01`)
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+    .replace(/\[([^\]\n]{1,200})\]\((https?:\/\/[^\s<>()]{1,800})\)/g, (_, label, url) => {
+      const href = safeHttpUrl(url.replace(/&amp;/g, '&'));
+      return href === '#'
+        ? `${label} (${url})`
+        : `<a href="${href}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+    })
     .replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>')
     .replace(/^#{2,4} (.*)$/gm, '<h4>$1</h4>')
     .replace(/^\s*[-•*] (.*)$/gm, '<li>$1</li>')
@@ -1215,6 +1221,7 @@ const TOOL_LABELS = {
   get_rank: '查询涨跌榜',
   get_overview: '查询市场概况',
   get_news: '翻阅财经新闻',
+  get_stock_events: '检索个股资讯',
   search_stock: '搜索股票',
 };
 
@@ -1222,7 +1229,13 @@ async function sendChat() {
   const input = $('#chatInput');
   const question = input.value.trim();
   if (!question || chat.busy || !chat.activeId) return;
-  const text = chat.draftStock ? buildStockChatMessage(chat.draftStock, question) : question;
+  const draftStock = chat.draftStock ? { ...chat.draftStock } : null;
+  const stockContext = draftStock ? {
+    code: draftStock.code,
+    name: draftStock.name || draftStock.displayName || '',
+    market: draftStock.market,
+  } : null;
+  const text = draftStock ? buildStockChatMessage(draftStock, question) : question;
   const sessionId = chat.activeId;
   const viewReq = chat.selectReq;
   chat.busy = true;
@@ -1243,7 +1256,11 @@ async function sendChat() {
     const res = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId, message: text }),
+      body: JSON.stringify({
+        sessionId,
+        message: text,
+        ...(stockContext ? { stockContext } : {}),
+      }),
     });
     if (!res.ok) {
       const j = await res.json().catch(() => ({}));
