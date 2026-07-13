@@ -69,6 +69,52 @@ function isMarketOpen(market, date = new Date()) {
   return minutes >= 555 && minutes <= 905;
 }
 
+function marketSession(market, date = new Date()) {
+  const normalized = market === 'us' || market === 'hk' ? market : 'cn';
+  const timezone = normalized === 'us'
+    ? 'America/New_York'
+    : normalized === 'hk' ? 'Asia/Hong_Kong' : 'Asia/Shanghai';
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: timezone,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type).value;
+  const basis = 'regular_hours_without_holiday_calendar';
+  const result = (code, label, isOpen = false) => ({
+    code,
+    label,
+    isOpen,
+    basis,
+    calendarAware: false,
+  });
+  const weekday = get('weekday');
+  if (weekday === 'Sat' || weekday === 'Sun') return result('weekend', '周末休市');
+  const minutes = parseInt(get('hour'), 10) * 60 + parseInt(get('minute'), 10);
+
+  if (normalized === 'cn') {
+    if (minutes < 555) return result('pre', '盘前');
+    if (minutes < 570) return result('auction', '集合竞价');
+    if (minutes < 690) return result('regular', '常规交易时段', true);
+    if (minutes < 780) return result('lunch', '午间休市');
+    if (minutes < 900) return result('regular', '常规交易时段', true);
+    return result('closed', '已收盘');
+  }
+  if (normalized === 'hk') {
+    if (minutes < 570) return result('pre', '盘前');
+    if (minutes < 720) return result('regular', '常规交易时段', true);
+    if (minutes < 780) return result('lunch', '午间休市');
+    if (minutes < 960) return result('regular', '常规交易时段', true);
+    return result('closed', '已收盘');
+  }
+  if (minutes < 570) return result('pre', '盘前');
+  if (minutes < 960) return result('regular', '常规交易时段', true);
+  if (minutes < 1200) return result('post', '盘后');
+  return result('closed', '已收盘');
+}
+
 const isMarketOpenSrv = isMarketOpen;
 
 module.exports = {
@@ -80,4 +126,5 @@ module.exports = {
   dateInTimezone,
   isMarketOpen,
   isMarketOpenSrv,
+  marketSession,
 };

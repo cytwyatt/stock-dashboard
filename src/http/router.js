@@ -12,6 +12,7 @@ function createHttpHandler({
   auth,
   staticServer,
   marketService,
+  marketSummaryService,
   chatService,
   llmConfigStore,
   llmClient,
@@ -90,6 +91,28 @@ function createHttpHandler({
         const dir = url.searchParams.get('dir') === 'down' ? 'down' : 'up';
         const entry = await marketService.rank(market, dir);
         return sendMarketJSON(res, entry, { market }, marketMeta);
+      }
+      if (pathname === '/api/market-summary') {
+        if (req.method !== 'GET' && req.method !== 'POST') {
+          return sendJSON(res, 405, { error: 'method not allowed' });
+        }
+        let requestedMarket = url.searchParams.get('market');
+        let force = false;
+        if (req.method === 'POST') {
+          let body;
+          try { body = JSON.parse(await readBody(req)); }
+          catch { return sendJSON(res, 400, { error: 'JSON 格式不正确' }); }
+          if (!body || typeof body !== 'object' || Array.isArray(body)) {
+            return sendJSON(res, 400, { error: '请求体格式不正确' });
+          }
+          requestedMarket = body.market;
+          force = true;
+        }
+        const market = requestedMarket === 'us' || requestedMarket === 'hk'
+          ? requestedMarket
+          : 'cn';
+        const entry = await marketSummaryService.getSummary(market, { force });
+        return sendMarketJSON(res, entry, { market, currency: null }, marketMeta);
       }
 
       if (pathname === '/api/llm-config') {

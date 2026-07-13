@@ -12,6 +12,7 @@ const {
   dateInTimezone,
   isMarketOpen,
   isMarketOpenSrv,
+  marketSession,
 } = require('../src/core/time');
 
 test('腾讯时间显示与 ISO 格式保持现有 A/H 股口径', () => {
@@ -71,4 +72,30 @@ test('开市判断保持各市场周末与起止分钟边界', () => {
   }
 
   assert.equal(isMarketOpen('unknown', new Date('2026-07-13T01:15:00Z')), true);
+});
+
+test('AI 总结交易阶段区分集合竞价、午休、盘前盘后并声明未覆盖节假日', () => {
+  const cases = [
+    ['cn', '2026-07-13T01:20:00Z', 'auction', '集合竞价', false],
+    ['cn', '2026-07-13T02:00:00Z', 'regular', '常规交易时段', true],
+    ['cn', '2026-07-13T04:00:00Z', 'lunch', '午间休市', false],
+    ['cn', '2026-07-13T05:30:00Z', 'regular', '常规交易时段', true],
+    ['hk', '2026-07-13T04:30:00Z', 'lunch', '午间休市', false],
+    ['hk', '2026-07-13T08:30:00Z', 'closed', '已收盘', false],
+    ['us', '2026-07-13T12:00:00Z', 'pre', '盘前', false],
+    ['us', '2026-07-13T14:00:00Z', 'regular', '常规交易时段', true],
+    ['us', '2026-07-13T20:30:00Z', 'post', '盘后', false],
+    ['us', '2026-07-14T01:00:00Z', 'closed', '已收盘', false],
+    ['cn', '2026-07-12T02:00:00Z', 'weekend', '周末休市', false],
+  ];
+  for (const [market, iso, code, label, isOpen] of cases) {
+    const result = marketSession(market, new Date(iso));
+    assert.deepEqual(
+      { code: result.code, label: result.label, isOpen: result.isOpen },
+      { code, label, isOpen },
+      `${market} ${iso}`,
+    );
+    assert.equal(result.basis, 'regular_hours_without_holiday_calendar');
+    assert.equal(result.calendarAware, false);
+  }
 });

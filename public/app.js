@@ -90,8 +90,8 @@ function fmtVol(v) {
   return String(Math.round(v));
 }
 
-async function api(path) {
-  const res = await fetch(path);
+async function api(path, options) {
+  const res = await fetch(path, options);
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
   const body = await res.json();
   if (body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'data') && body.meta) {
@@ -1139,8 +1139,177 @@ async function loadNews() {
     .join('');
 }
 
+/* ---------- AI 大盘总结 ---------- */
+let summaryReq = 0;
+
+const summaryText = (value) =>
+  typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
+
+function summaryStanceClass(stance) {
+  const value = summaryText(stance).toLowerCase();
+  if (/(偏强|强势|上涨|bull|positive|strong)/.test(value)) return 'positive';
+  if (/(偏弱|弱势|下跌|bear|negative|weak)/.test(value)) return 'negative';
+  return 'neutral';
+}
+
+function summarySessionLabel(session) {
+  const value = session && typeof session === 'object'
+    ? summaryText(session.label) || summaryText(session.state)
+    : summaryText(session);
+  const labels = {
+    pre: '盘前', premarket: '盘前', open: '盘中', regular: '盘中',
+    post: '盘后', postmarket: '盘后', closed: '休市', holiday: '休市',
+  };
+  return labels[value.toLowerCase()] || value;
+}
+
+function renderSummaryItems(items, emptyText) {
+  const values = Array.isArray(items) ? items.map(summaryText).filter(Boolean) : [];
+  return values.length
+    ? `<ul>${values.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+    : `<p class="market-summary-empty">${escapeHtml(emptyText)}</p>`;
+}
+
+function setSummaryNotice(text, type = 'warning') {
+  const el = $('#marketSummaryNotice');
+  el.textContent = text || '';
+  el.classList.toggle('error', type === 'error');
+  el.style.display = text ? 'block' : 'none';
+}
+
+function setSummaryBusy(busy) {
+  const card = $('#marketSummarySection');
+  const content = $('#marketSummaryContent');
+  const btn = $('#marketSummaryRefresh');
+  card.classList.toggle('is-loading', busy);
+  content.setAttribute('aria-busy', busy ? 'true' : 'false');
+  btn.disabled = busy;
+  btn.textContent = busy ? '分析中…' : '重新分析';
+}
+
+function renderSummaryLoading(market) {
+  const content = $('#marketSummaryContent');
+  content.dataset.hasSummary = 'false';
+  content.innerHTML = `<div class="market-summary-state market-summary-loading"><span aria-hidden="true">●</span> 正在生成${escapeHtml(MARKET_LABELS[market] || '')}市场总结…</div>`;
+}
+
+function renderSummaryUnconfigured(data) {
+  const marketLabel = summaryText(data.marketLabel) || MARKET_LABELS[state.market] || '当前市场';
+  const content = $('#marketSummaryContent');
+  content.dataset.hasSummary = 'false';
+  content.innerHTML = `
+    <div class="market-summary-state">
+      <div class="market-summary-state-copy">
+        <strong>尚未配置 AI 模型</strong>
+        <span>完成模型和 API Key 设置后，即可生成${escapeHtml(marketLabel)}大盘总结。</span>
+        <button type="button" class="market-summary-config" data-summary-config>前往模型设置</button>
+      </div>
+    </div>`;
+}
+
+function renderSummaryError() {
+  const content = $('#marketSummaryContent');
+  content.dataset.hasSummary = 'false';
+  content.innerHTML = `
+    <div class="market-summary-state">
+      <div class="market-summary-state-copy">
+        <strong>AI 总结暂时不可用</strong>
+        <span>可以稍后重试，其他行情区块不受影响。</span>
+      </div>
+    </div>`;
+}
+
+function renderMarketSummary(data) {
+  const marketLabel = summaryText(data.marketLabel) || MARKET_LABELS[data.market] || MARKET_LABELS[state.market] || '';
+  const stance = summaryText(data.stance) || '震荡';
+  const headline = summaryText(data.headline) || '当前数据不足，暂时无法形成明确的市场结论。';
+  const breadth = summaryText(data.breadth) || '暂无足够的市场广度数据。';
+  const session = summarySessionLabel(data.session);
+  const sessionTitle = data.sessionBasis === 'regular_hours_without_holiday_calendar'
+    ? '交易阶段（常规时间）'
+    : '交易阶段';
+  const model = summaryText(data.model);
+  const generatedAt = shortAsOf(data.generatedAt, data._meta && data._meta.timezone);
+  const disclaimer = summaryText(data.disclaimer) || 'AI 自动生成，仅供参考，不构成投资建议。';
+  const meta = {
+    ...(data._meta || {}),
+    asOf: data.dataAsOf || (data._meta && data._meta.asOf),
+    fetchedAt: data.generatedAt || (data._meta && data._meta.fetchedAt),
+  };
+
+  $('#marketSummaryTitle').textContent = `✨ AI 大盘总结${marketLabel ? ` · ${marketLabel}` : ''}`;
+  setDataMeta($('#marketSummaryDataMeta'), meta);
+  const content = $('#marketSummaryContent');
+  content.dataset.hasSummary = 'true';
+  content.innerHTML = `
+    <div class="market-summary-lead">
+      <span class="market-summary-stance ${summaryStanceClass(stance)}">${escapeHtml(stance)}</span>
+      <p class="market-summary-headline">${escapeHtml(headline)}</p>
+    </div>
+    <div class="market-summary-grid">
+      <section class="market-summary-block"><h3>市场广度</h3><p>${escapeHtml(breadth)}</p></section>
+      <section class="market-summary-block"><h3>主要驱动</h3>${renderSummaryItems(data.drivers, '暂无明确驱动信号。')}</section>
+      <section class="market-summary-block"><h3>风险提示</h3>${renderSummaryItems(data.risks, '暂未识别到突出的新增风险。')}</section>
+      <section class="market-summary-block"><h3>接下来关注</h3>${renderSummaryItems(data.watchPoints, '暂无额外关注点。')}</section>
+    </div>
+    <div class="market-summary-foot">
+      ${session ? `<span>${sessionTitle}：${escapeHtml(session)}</span>` : ''}
+      ${generatedAt ? `<span>生成：${escapeHtml(generatedAt)}</span>` : ''}
+      ${model ? `<span>模型：${escapeHtml(model)}</span>` : ''}
+      <span class="market-summary-disclaimer">${escapeHtml(disclaimer)}</span>
+    </div>`;
+}
+
+async function loadMarketSummary({ force = false } = {}) {
+  const market = state.market;
+  if (market !== 'cn' && market !== 'hk' && market !== 'us') return;
+  const req = ++summaryReq;
+  const content = $('#marketSummaryContent');
+  const hadSummary = content.dataset.hasSummary === 'true';
+  $('#marketSummaryTitle').textContent = `✨ AI 大盘总结 · ${MARKET_LABELS[market]}`;
+  setSummaryNotice('');
+  setSummaryBusy(true);
+  if (!force || !hadSummary) renderSummaryLoading(market);
+
+  try {
+    const path = `/api/market-summary?market=${encodeURIComponent(market)}`;
+    const data = await api(path, force
+      ? {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ market }),
+        }
+      : undefined);
+    if (req !== summaryReq || market !== state.market) return;
+    if (!data || typeof data !== 'object') throw new Error('market summary response is invalid');
+    if (data.configured === false) {
+      setDataMeta($('#marketSummaryDataMeta'), data._meta);
+      renderSummaryUnconfigured(data);
+      return;
+    }
+    const responseMarket = summaryText(data.market).toLowerCase();
+    if (responseMarket && responseMarket !== market) throw new Error('market summary response market mismatch');
+    renderMarketSummary(data);
+    if (data._meta && data._meta.stale) {
+      setSummaryNotice('⚠ 当前展示缓存总结；最新数据刷新失败，请留意截止时间。');
+    }
+  } catch (error) {
+    if (req !== summaryReq || market !== state.market) return;
+    console.error('market summary error', error);
+    if (hadSummary) setSummaryNotice('重新分析失败，仍保留上一次总结。', 'error');
+    else {
+      setSummaryNotice('AI 总结加载失败，请稍后重试。', 'error');
+      setDataMeta($('#marketSummaryDataMeta'), null);
+      renderSummaryError();
+    }
+  } finally {
+    if (req === summaryReq && market === state.market) setSummaryBusy(false);
+  }
+}
+
 /* ---------- 市场切换 ---------- */
 async function switchMarket(market) {
+  summaryReq++; // 使上一市场或同市场的旧总结请求立即失效
   state.market = market;
   state.activeCode = null;
   document.querySelectorAll('#marketTabs .tab').forEach((b) =>
@@ -1148,6 +1317,7 @@ async function switchMarket(market) {
   );
   const isQuote = market === 'cn' || market === 'hk' || market === 'us';
   $('#indexSection').style.display = isQuote ? '' : 'none';
+  $('#marketSummarySection').style.display = isQuote ? 'block' : 'none';
   $('#chartSection').style.display = isQuote ? '' : 'none';
   // 市场概况仅A股/美股有数据源
   $('#overviewSection').style.display = market === 'cn' || market === 'us' ? '' : 'none';
@@ -1161,6 +1331,12 @@ async function switchMarket(market) {
   document.querySelectorAll('#chartSwitch .switch-btn').forEach((b) =>
     b.classList.toggle('active', b.dataset.type === state.chartType)
   );
+  // 总结请求可能仍在生成；切换任何 tab 都立即清空并恢复交互状态。
+  $('#marketSummaryContent').innerHTML = '';
+  $('#marketSummaryContent').dataset.hasSummary = 'false';
+  setSummaryBusy(false);
+  setSummaryNotice('');
+  setDataMeta($('#marketSummaryDataMeta'), null);
   if (market === 'llm') {
     $('#updateTime').textContent = '';
     await initChat();
@@ -1197,6 +1373,7 @@ async function refreshQuotes() {
 
 function refreshAll() {
   refreshQuotes();
+  loadMarketSummary(); // 首次加载和切换市场时生成；不跟随 30 秒行情轮询
   loadNews().catch(console.error);
 }
 
@@ -1640,6 +1817,10 @@ document.querySelectorAll('#chartSwitch .switch-btn').forEach((b) =>
 document.querySelectorAll('#sectorSwitch .switch-btn').forEach((b) =>
   b.addEventListener('click', () => setSectorView(b.dataset.view))
 );
+$('#marketSummaryRefresh').addEventListener('click', () => loadMarketSummary({ force: true }));
+$('#marketSummaryContent').addEventListener('click', (e) => {
+  if (e.target.closest('[data-summary-config]')) openLLMConfig().catch(console.error);
+});
 document.querySelectorAll('#mChartSwitch .switch-btn').forEach((b) =>
   b.addEventListener('click', () => setModalChartType(b.dataset.type))
 );
@@ -1724,6 +1905,9 @@ $('#llmSave').addEventListener('click', async () => {
   try {
     const j = await saveLLMConfig();
     setLLMStatus(j.configured ? '✓ 已保存，立即生效' : '已保存，但还没有 API Key', j.configured);
+    if (j.configured && ['cn', 'hk', 'us'].includes(state.market)) {
+      loadMarketSummary({ force: true });
+    }
   } catch (e) { setLLMStatus(e.message, false); }
 });
 $('#llmTest').addEventListener('click', async () => {
@@ -1734,6 +1918,9 @@ $('#llmTest').addEventListener('click', async () => {
     setLLMStatus('正在测试连接…');
     const r = await fetch('/api/llm-config/test', { method: 'POST' }).then((x) => x.json());
     setLLMStatus(r.ok ? `✓ ${r.message}` : `✗ ${r.message}`, r.ok);
+    if (r.ok && ['cn', 'hk', 'us'].includes(state.market)) {
+      loadMarketSummary({ force: true });
+    }
   } catch (e) { setLLMStatus(e.message, false); }
   btn.disabled = false;
 });

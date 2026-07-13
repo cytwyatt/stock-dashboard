@@ -31,6 +31,7 @@ const {
   fmtTimeInTZ,
   dateInTimezone,
   isMarketOpen,
+  marketSession,
 } = require('./core/time');
 const researchDomain = require('./domain/research-card');
 
@@ -63,6 +64,7 @@ const { createLLMConfigStore } = require('./storage/llm-config-store');
 const { createChatStore } = require('./storage/chat-store');
 
 const { createLLMClient } = require('./ai/llm-client');
+const { createMarketSummaryService } = require('./ai/market-summary-service');
 const { LLM_TOOLS, serializeToolResult, createToolRunner } = require('./ai/tools');
 const prompts = require('./ai/prompts');
 const {
@@ -97,7 +99,7 @@ function createApplication({
   if (!runtime || !runtime.cache || !runtime.yahooScheduler) {
     throw new TypeError('runtime must provide cache and yahooScheduler');
   }
-  const { cache, cached, cachedEntry } = runtime.cache;
+  const { cache, cached, cachedEntry, expireCached } = runtime.cache;
   const port = env.PORT || 3888;
   const projectDir = path.join(__dirname, '..');
   const publicDir = path.join(projectDir, 'public');
@@ -190,6 +192,17 @@ function createApplication({
   });
 
   const llmClient = createLLMClient({ fetchImpl });
+  const marketSummaryService = createMarketSummaryService({
+    cachedEntry,
+    expireCached,
+    marketService,
+    llmConfigStore,
+    llmClient,
+    marketMeta,
+    annotateMarketData,
+    marketSession,
+    marketSummarySystemPrompt: prompts.marketSummarySystemPrompt,
+  });
   const toolRunner = createToolRunner({
     marketService,
     stockEventsService,
@@ -226,6 +239,7 @@ function createApplication({
     auth,
     staticServer,
     marketService,
+    marketSummaryService,
     chatService,
     llmConfigStore,
     llmClient,
@@ -269,6 +283,7 @@ function createApplication({
     cachedEntry,
     marketData,
     marketService,
+    marketSummaryService,
     stockEventsService,
     chatService,
     stores: { watchlistStore, llmConfigStore, chatStore },

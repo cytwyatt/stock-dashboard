@@ -70,7 +70,17 @@ function createCacheRuntime({
     return (await cachedEntry(key, ttlMs, fn)).data;
   }
 
-  return { cache, inflight, cached, cachedEntry };
+  // Mark an entry expired without deleting its value. The next cachedEntry()
+  // call refreshes it, while a failed refresh can still fall back to the old
+  // value. This is useful for explicit user-triggered refreshes.
+  function expireCached(key) {
+    const hit = cache.get(key);
+    if (!hit) return false;
+    hit.expire = 0;
+    return true;
+  }
+
+  return { cache, inflight, cached, cachedEntry, expireCached };
 }
 
 const defaultCacheRuntime = createCacheRuntime();

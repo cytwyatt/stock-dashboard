@@ -150,6 +150,95 @@ a { color: inherit; text-decoration: none; }
 .c-down { color: var(--down); }
 .c-flat { color: var(--text-dim); }
 
+/* ---------- AI 大盘总结 ---------- */
+.market-summary-card {
+  border-color: rgba(74, 158, 255, 0.34);
+  background: linear-gradient(135deg, rgba(74, 158, 255, 0.07), transparent 42%), var(--card);
+}
+.market-summary-head { gap: 10px; }
+.market-summary-action,
+.market-summary-config {
+  flex: 0 0 auto;
+  border: 1px solid rgba(74, 158, 255, 0.45);
+  border-radius: 8px;
+  background: rgba(74, 158, 255, 0.1);
+  color: #8fc2ff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.market-summary-action:hover,
+.market-summary-action:focus-visible,
+.market-summary-config:hover,
+.market-summary-config:focus-visible {
+  border-color: var(--accent);
+  background: rgba(74, 158, 255, 0.18);
+  color: #fff;
+  outline: none;
+}
+.market-summary-action:disabled { opacity: 0.55; cursor: default; }
+.market-summary-content { overflow-wrap: anywhere; }
+.market-summary-card.is-loading .market-summary-content { opacity: 0.72; }
+.market-summary-notice {
+  margin-bottom: 10px;
+  border: 1px solid rgba(214, 168, 75, 0.35);
+  border-radius: 8px;
+  background: rgba(214, 168, 75, 0.08);
+  color: #d6a84b;
+  font-size: 12px;
+  padding: 7px 10px;
+}
+.market-summary-notice.error {
+  border-color: rgba(240, 82, 79, 0.35);
+  background: rgba(240, 82, 79, 0.08);
+  color: #f58a87;
+}
+.market-summary-lead { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
+.market-summary-stance {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 6px 9px;
+}
+.market-summary-stance.positive { background: rgba(240, 82, 79, 0.14); color: #f58a87; }
+.market-summary-stance.negative { background: rgba(46, 189, 133, 0.14); color: #63d5a8; }
+.market-summary-stance.neutral { background: rgba(139, 148, 158, 0.15); color: #b4bdc8; }
+.market-summary-headline { font-size: 14px; font-weight: 600; line-height: 1.65; }
+.market-summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.market-summary-block { min-width: 0; border-radius: 9px; background: var(--bg); padding: 10px 12px; }
+.market-summary-block h3 { margin-bottom: 5px; color: var(--text-dim); font-size: 12px; font-weight: 600; }
+.market-summary-block p,
+.market-summary-block li { font-size: 13px; line-height: 1.6; }
+.market-summary-block ul { margin-left: 18px; }
+.market-summary-empty { color: var(--text-dim); }
+.market-summary-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.market-summary-disclaimer { flex-basis: 100%; }
+.market-summary-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 86px;
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+}
+.market-summary-state-copy { display: flex; align-items: center; flex-direction: column; gap: 4px; }
+.market-summary-state-copy strong { color: var(--text); font-size: 14px; }
+.market-summary-state-copy .market-summary-config { margin-top: 7px; }
+.market-summary-loading span { animation: chatPulse 1s infinite; }
+
 /* ---------- 图表 ---------- */
 .chart { width: 100%; height: 420px; }
 .chart-switch { display: flex; gap: 4px; background: var(--bg); border-radius: 8px; padding: 3px; }
@@ -733,6 +822,12 @@ a { color: inherit; text-decoration: none; }
   .index-cards::-webkit-scrollbar { display: none; }
   .index-card { flex: 0 0 128px; padding: 10px 12px; }
   .index-card .idx-price { font-size: 17px; }
+  .market-summary-card { padding: 12px; }
+  .market-summary-head { align-items: flex-start; flex-wrap: wrap; }
+  .market-summary-head .section-heading { flex: 1 1 210px; }
+  .market-summary-action, .market-summary-config { min-height: 40px; }
+  .market-summary-lead { flex-direction: column; gap: 7px; }
+  .market-summary-grid { grid-template-columns: 1fr; }
   .chart { height: 320px; }
   .sector-map { height: 340px; }
   .macro-grid { grid-template-columns: repeat(3, 1fr); gap: 8px; }

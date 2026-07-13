@@ -35,17 +35,19 @@ function createLLMClient({ fetchImpl = global.fetch } = {}) {
     }
   }
 
-  async function complete(cfg, messages, tools) {
+  async function complete(cfg, messages, tools, options = {}) {
+    const hasTools = Array.isArray(tools) && tools.length > 0;
+    const payload = {
+      model: cfg.model,
+      messages,
+      temperature: options.temperature == null ? 0.3 : options.temperature,
+      ...(options.maxTokens == null ? {} : { max_tokens: options.maxTokens }),
+      ...(hasTools ? { tools, tool_choice: 'auto' } : {}),
+    };
     const res = await fetchImpl(`${cfg.baseUrl}/chat/completions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${cfg.apiKey}` },
-      body: JSON.stringify({
-        model: cfg.model,
-        messages,
-        tools,
-        tool_choice: 'auto',
-        temperature: 0.3,
-      }),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(120000),
     });
     if (!res.ok) {

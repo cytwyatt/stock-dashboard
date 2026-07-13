@@ -33,6 +33,21 @@
       <div class="index-cards" id="indexCards"></div>
     </section>
 
+    <!-- AI 大盘总结（A股 / 港股 / 美股） -->
+    <section class="section card market-summary-card" id="marketSummarySection" style="display:block">
+      <div class="section-head market-summary-head">
+        <div class="section-heading">
+          <h2 id="marketSummaryTitle">✨ AI 大盘总结</h2>
+          <span class="data-meta" id="marketSummaryDataMeta"></span>
+        </div>
+        <button type="button" class="market-summary-action" id="marketSummaryRefresh">重新分析</button>
+      </div>
+      <div class="market-summary-notice" id="marketSummaryNotice" role="status" style="display:none"></div>
+      <div class="market-summary-content" id="marketSummaryContent" aria-live="polite" aria-busy="false">
+        <div class="market-summary-state market-summary-loading"><span aria-hidden="true">●</span> 正在生成市场总结…</div>
+      </div>
+    </section>
+
     <!-- 自选股 -->
     <section class="section card" id="watchSection" style="display:none">
       <div class="section-head"><div class="section-heading"><h2>⭐ 自选股</h2><span class="data-meta" id="watchDataMeta"></span></div></div>
