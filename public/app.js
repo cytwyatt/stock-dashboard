@@ -1163,11 +1163,128 @@ function summarySessionLabel(session) {
   return labels[value.toLowerCase()] || value;
 }
 
+const SUMMARY_CLAIM_LABELS = {
+  observation: '事实',
+  association: '关联',
+  causal: '事件归因',
+};
+
+const SUMMARY_EVIDENCE_LABELS = {
+  indices: '主要指数',
+  overview: '市场概况',
+  sectors: '行业板块',
+  representativeGainers: '代表性领涨样本',
+  representativeLosers: '代表性领跌样本',
+  macroProxies: '跨资产信号',
+};
+
+const SUMMARY_CONFIDENCE_LABELS = { high: '高', medium: '中', low: '低' };
+
+function summaryEvidenceLabel(value) {
+  const text = summaryText(value);
+  const separator = text.indexOf(':');
+  const key = separator >= 0 ? text.slice(0, separator) : text;
+  const detail = separator >= 0 ? text.slice(separator + 1) : '';
+  const label = SUMMARY_EVIDENCE_LABELS[key] || key;
+  return detail ? `${label} · ${detail}` : label;
+}
+
+function renderSummaryEvidenceRefs(refs) {
+  const values = Array.isArray(refs) ? refs.map(summaryText).filter(Boolean) : [];
+  if (!values.length) return '';
+  const visible = values.slice(0, 3);
+  const remaining = values.length - visible.length;
+  return `<span class="market-summary-evidence" title="${escapeHtml(values.map(summaryEvidenceLabel).join(' · '))}">依据：${visible
+    .map((ref) => escapeHtml(summaryEvidenceLabel(ref))).join(' · ')}${remaining > 0 ? ` · +${remaining}` : ''}</span>`;
+}
+
+function normalizeSummaryItems(items) {
+  if (!Array.isArray(items)) return [];
+  return items.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      return { text: summaryText(item), evidenceRefs: [], claimType: '' };
+    }
+    const refs = Array.isArray(item.evidenceRefs)
+      ? item.evidenceRefs.map(summaryText).filter(Boolean)
+      : [];
+    return {
+      text: summaryText(item.text) || summaryText(item.message) || summaryText(item.label),
+      evidenceRefs: refs,
+      claimType: summaryText(item.claimType),
+    };
+  }).filter((item) => item.text);
+}
+
 function renderSummaryItems(items, emptyText) {
-  const values = Array.isArray(items) ? items.map(summaryText).filter(Boolean) : [];
+  const values = normalizeSummaryItems(items);
   return values.length
-    ? `<ul>${values.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+    ? `<ul class="market-summary-list">${values.map((item) => {
+        const claimLabel = SUMMARY_CLAIM_LABELS[item.claimType] || item.claimType;
+        const evidence = renderSummaryEvidenceRefs(item.evidenceRefs);
+        const claim = claimLabel
+          ? `<span class="market-summary-claim">${escapeHtml(claimLabel)}</span>`
+          : '';
+        return `<li><span class="market-summary-item-text">${escapeHtml(item.text)}</span>${claim || evidence
+          ? `<span class="market-summary-item-meta">${claim}${evidence}</span>`
+          : ''}</li>`;
+      }).join('')}</ul>`
     : `<p class="market-summary-empty">${escapeHtml(emptyText)}</p>`;
+}
+
+function renderSummaryWarnings(items) {
+  const warnings = normalizeSummaryItems(items);
+  if (!warnings.length) return '';
+  return `<aside class="market-summary-data-warnings">
+    <h3>数据提示</h3>
+    ${renderSummaryItems(warnings, '')}
+  </aside>`;
+}
+
+function summaryObjectLabel(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return summaryText(value);
+  return summaryText(value.label)
+    || summaryText(value.text)
+    || summaryText(value.name)
+    || summaryText(value.value)
+    || summaryText(value.code);
+}
+
+function renderSummaryConfidence(value) {
+  if (value == null || value === '') return '';
+  const object = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const rawScore = Object.prototype.hasOwnProperty.call(object, 'score') ? object.score : value;
+  const score = Number(rawScore);
+  const scoreText = Number.isFinite(score) && score >= 0 && score <= 100
+    ? `${Number.isInteger(score) ? score : score.toFixed(1)}/100`
+    : '';
+  const level = summaryText(object.level).toLowerCase();
+  const label = SUMMARY_CONFIDENCE_LABELS[level] || summaryText(object.label) || summaryText(object.level)
+    || (!scoreText ? summaryText(value) : '');
+  const detail = [scoreText, label].filter(Boolean).join(' · ');
+  const reasons = Array.isArray(object.reasons)
+    ? object.reasons.map(summaryText).filter(Boolean)
+    : [];
+  const title = reasons.length ? ` title="${escapeHtml(reasons.join('；'))}"` : '';
+  return detail
+    ? `<span class="market-summary-confidence"${title}>证据质量 ${escapeHtml(detail)}</span>`
+    : '';
+}
+
+function summaryTimeRange(data, timezone) {
+  const rangeValue = [data.evidenceTimeRange, data.evidenceRange, data.evidenceAsOfRange]
+    .find((value) => value != null && value !== '');
+  if (rangeValue && typeof rangeValue !== 'object') return summaryText(rangeValue);
+  const range = Array.isArray(rangeValue)
+    ? { earliest: rangeValue[0], latest: rangeValue[rangeValue.length - 1] }
+    : rangeValue || {};
+  const earliestRaw = data.evidenceEarliestAsOf || data.earliestEvidenceAsOf
+    || data.earliestDataAsOf || range.earliest || range.start;
+  const latestRaw = data.evidenceLatestAsOf || data.latestEvidenceAsOf
+    || data.latestDataAsOf || range.latest || range.end;
+  const earliest = shortAsOf(earliestRaw, timezone);
+  const latest = shortAsOf(latestRaw, timezone);
+  if (earliest && latest) return earliest === latest ? earliest : `${earliest} — ${latest}`;
+  return earliest || latest;
 }
 
 function setSummaryNotice(text, type = 'warning') {
@@ -1221,19 +1338,39 @@ function renderSummaryError() {
 
 function renderMarketSummary(data) {
   const marketLabel = summaryText(data.marketLabel) || MARKET_LABELS[data.market] || MARKET_LABELS[state.market] || '';
-  const stance = summaryText(data.stance) || '震荡';
+  const stance = summaryText(data.stance) || '中性';
   const headline = summaryText(data.headline) || '当前数据不足，暂时无法形成明确的市场结论。';
-  const breadth = summaryText(data.breadth) || '暂无足够的市场广度数据。';
+  const breadthObject = data.breadth && typeof data.breadth === 'object' && !Array.isArray(data.breadth)
+    ? data.breadth
+    : null;
+  const breadthAvailable = data.breadthAvailable !== false
+    && !(breadthObject && (breadthObject.available === false || breadthObject.status === 'unavailable'));
+  const breadth = summaryText(data.breadth)
+    || (breadthObject && (summaryText(breadthObject.text) || summaryText(breadthObject.summary)))
+    || (breadthAvailable ? '暂无足够的市场广度数据。' : '当前未提供全市场广度数据。');
+  const breadthTitle = breadthAvailable ? '市场广度' : '数据覆盖';
+  const signals = Array.isArray(data.signals) ? data.signals : data.drivers;
+  const confidence = data.confidence != null ? data.confidence : {
+    score: data.confidenceScore,
+    level: data.confidenceLevel,
+    label: data.confidenceLabel,
+  };
   const session = summarySessionLabel(data.session);
   const sessionTitle = data.sessionBasis === 'regular_hours_without_holiday_calendar'
     ? '交易阶段（常规时间）'
     : '交易阶段';
   const model = summaryText(data.model);
-  const generatedAt = shortAsOf(data.generatedAt, data._meta && data._meta.timezone);
+  const timezone = data._meta && data._meta.timezone;
+  const generatedAt = shortAsOf(data.generatedAt, timezone);
+  const horizon = summaryObjectLabel(data.horizon);
+  const coreAsOf = shortAsOf(data.coreAsOf || data.coreDataAsOf, timezone);
+  const evidenceRange = summaryTimeRange(data, timezone);
+  const headlineEvidence = renderSummaryEvidenceRefs(data.headlineEvidenceRefs);
+  const breadthEvidence = renderSummaryEvidenceRefs(data.breadthEvidenceRefs);
   const disclaimer = summaryText(data.disclaimer) || 'AI 自动生成，仅供参考，不构成投资建议。';
   const meta = {
     ...(data._meta || {}),
-    asOf: data.dataAsOf || (data._meta && data._meta.asOf),
+    asOf: data.coreAsOf || data.coreDataAsOf || data.dataAsOf || (data._meta && data._meta.asOf),
     fetchedAt: data.generatedAt || (data._meta && data._meta.fetchedAt),
   };
 
@@ -1243,17 +1380,27 @@ function renderMarketSummary(data) {
   content.dataset.hasSummary = 'true';
   content.innerHTML = `
     <div class="market-summary-lead">
-      <span class="market-summary-stance ${summaryStanceClass(stance)}">${escapeHtml(stance)}</span>
-      <p class="market-summary-headline">${escapeHtml(headline)}</p>
+      <span class="market-summary-badges">
+        <span class="market-summary-stance ${summaryStanceClass(stance)}">${escapeHtml(stance)}</span>
+        ${renderSummaryConfidence(confidence)}
+      </span>
+      <span class="market-summary-headline-wrap">
+        <p class="market-summary-headline">${escapeHtml(headline)}</p>
+        ${headlineEvidence}
+      </span>
     </div>
+    ${renderSummaryWarnings(data.dataWarnings)}
     <div class="market-summary-grid">
-      <section class="market-summary-block"><h3>市场广度</h3><p>${escapeHtml(breadth)}</p></section>
-      <section class="market-summary-block"><h3>主要驱动</h3>${renderSummaryItems(data.drivers, '暂无明确驱动信号。')}</section>
-      <section class="market-summary-block"><h3>风险提示</h3>${renderSummaryItems(data.risks, '暂未识别到突出的新增风险。')}</section>
+      <section class="market-summary-block"><h3>${breadthTitle}</h3><p>${escapeHtml(breadth)}</p>${breadthEvidence}</section>
+      <section class="market-summary-block"><h3>市场信号</h3>${renderSummaryItems(signals, '暂无明确市场信号。')}</section>
+      <section class="market-summary-block"><h3>风险提示</h3>${renderSummaryItems(data.risks, '当前证据不足以识别新增市场风险。')}</section>
       <section class="market-summary-block"><h3>接下来关注</h3>${renderSummaryItems(data.watchPoints, '暂无额外关注点。')}</section>
     </div>
     <div class="market-summary-foot">
       ${session ? `<span>${sessionTitle}：${escapeHtml(session)}</span>` : ''}
+      ${horizon ? `<span>周期：${escapeHtml(horizon)}</span>` : ''}
+      ${coreAsOf ? `<span>核心截至：${escapeHtml(coreAsOf)}</span>` : ''}
+      ${evidenceRange ? `<span>证据区间：${escapeHtml(evidenceRange)}</span>` : ''}
       ${generatedAt ? `<span>生成：${escapeHtml(generatedAt)}</span>` : ''}
       ${model ? `<span>模型：${escapeHtml(model)}</span>` : ''}
       <span class="market-summary-disclaimer">${escapeHtml(disclaimer)}</span>
