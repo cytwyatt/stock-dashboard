@@ -1463,6 +1463,7 @@ const TOOL_LABELS = {
   get_indices: '查询大盘指数',
   get_quote: '查询个股报价',
   get_kline: '查询K线历史',
+  get_research_card: '读取个股研究卡',
   get_intraday: '查询分时走势',
   get_sectors: '查询板块资金流',
   get_rank: '查询涨跌榜',
