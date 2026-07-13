@@ -178,6 +178,16 @@ test('行情API统一返回data/meta并保留金融口径', async () => {
     assert.equal(research.body.meta.coverage.components.asset.stale, false);
     assert.equal(research.body.meta.coverage.components.benchmark.code, 'sh000300');
 
+    const emptyQuotes = await requestJSON(port, '/api/quotes?codes=');
+    assert.equal(emptyQuotes.status, 200);
+    assert.deepEqual(emptyQuotes.body.data, []);
+    assert.equal(emptyQuotes.body.meta.stale, false);
+    assert.equal(emptyQuotes.body.meta.market, null);
+
+    const emptySearch = await requestJSON(port, '/api/search?q=');
+    assert.equal(emptySearch.status, 200);
+    assert.deepEqual(emptySearch.body, []);
+
     const overview = await requestJSON(port, '/api/overview?market=cn');
     assert.equal(overview.status, 200);
     assert.deepEqual(

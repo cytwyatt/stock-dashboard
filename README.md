@@ -119,21 +119,39 @@ AI 会按需调用行情工具获取指数、报价、K 线、研究卡、分时
 
 ```mermaid
 flowchart LR
-  UI["浏览器<br/>Vanilla JS + ECharts"] --> API["Node.js 服务<br/>静态资源 / API 代理 / 缓存"]
-  API --> Market["腾讯 / 新浪 / Yahoo"]
-  API --> Data[("data/<br/>自选股 / 会话 / LLM 配置")]
-  API --> LLM["OpenAI 兼容 LLM"]
+  Entry["server.js<br/>薄启动入口"] --> Boot["src/bootstrap.js<br/>依赖装配"]
+  Boot --> HTTP["src/http/<br/>API / 静态资源 / 鉴权"]
+  UI["浏览器<br/>Vanilla JS + ECharts"] --> HTTP
+  HTTP --> App["src/services/ + src/ai/<br/>行情与 AI 编排"]
+  App --> Provider["src/providers/<br/>数据源适配"] --> Market["腾讯 / 新浪 / Yahoo"]
+  App --> Storage["src/storage/<br/>原子 JSON 持久化"] --> Data[("data/<br/>自选股 / 会话 / LLM 配置")]
+  HTTP --> Storage
+  App --> Logic["src/core/ + src/domain/<br/>共享规则 / 纯计算"]
+  App --> LLM["OpenAI 兼容 LLM"]
 ```
+
+`server.js` 只负责创建应用、启动服务和保留测试兼容导出；具体实现均位于 `src/`。组合根把缓存与 Yahoo 串行调度器作为同一个 runtime 管理，隔离测试则成对创建独立 runtime，避免缓存串扰或绕过上游限流。
 
 ```text
 stock-dashboard/
-├── server.js              # 静态服务、行情代理、缓存、AI 工具与会话
+├── server.js              # 薄启动入口与测试兼容导出
+├── src/
+│   ├── bootstrap.js       # 创建唯一依赖实例并装配 HTTP 服务
+│   ├── core/              # 缓存、行情元数据、代码与时间规则
+│   ├── domain/
+│   │   └── research-card.js  # 研究卡纯金融计算
+│   ├── storage/           # 自选、LLM 配置与会话的原子 JSON 持久化
+│   ├── providers/         # 腾讯、新浪、Yahoo 数据获取与解析
+│   ├── services/          # 市场路由、统一缓存、研究/资讯与预热
+│   ├── ai/                # LLM 客户端、工具、提示词、证据与对话编排
+│   └── http/              # 鉴权、路由、响应与静态资源
 ├── llm.json.example       # OpenAI 兼容模型配置示例
 ├── public/
 │   ├── index.html
 │   ├── app.js             # 页面状态、图表、搜索、自选与 AI 交互
 │   ├── style.css          # 深色主题与响应式布局
 │   └── vendor/            # 自托管 ECharts
+├── tests/                  # Node.js 内置测试的回归用例
 ├── docs/screenshots/      # README 产品截图
 └── data/                  # 运行时数据，不进入 Git
 ```
@@ -172,7 +190,7 @@ node --test tests/*.test.js
 
 ## 自定义
 
-- 指数列表：修改 `server.js` 中的 `CN_INDICES`、`HK_INDICES` 和 `US_INDICES`。
+- 指数列表：A股/港股修改 `src/providers/tencent.js`，美股修改 `src/providers/yahoo.js`。
 - 刷新频率：修改 `public/app.js` 底部的定时刷新逻辑。
 - 界面主题：修改 `public/style.css` 顶部的 CSS 变量。
 

@@ -15,7 +15,7 @@ const {
   compute52WeekRange,
   computeRelativeVolume,
   computeResearchCard,
-} = require('../server');
+} = require('../src/domain/research-card');
 
 const bar = (date, close, extra = {}) => ({
   date, open: close, high: close, low: close, close, volume: 100, ...extra,
