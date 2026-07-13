@@ -35,7 +35,7 @@
 
     <!-- 自选股 -->
     <section class="section card" id="watchSection" style="display:none">
-      <div class="section-head"><h2>⭐ 自选股</h2></div>
+      <div class="section-head"><div class="section-heading"><h2>⭐ 自选股</h2><span class="data-meta" id="watchDataMeta"></span></div></div>
       <table class="rank-table" id="watchTable"></table>
       <div class="loading" id="watchEmpty" style="display:none">
         暂无自选股 —— 搜索个股或点击涨跌榜里的股票，在详情中点 ♡ 添加
@@ -45,7 +45,7 @@
     <!-- 走势图 -->
     <section class="section card" id="chartSection">
       <div class="section-head">
-        <h2 id="chartTitle">上证指数</h2>
+        <div class="section-heading"><h2 id="chartTitle">上证指数</h2><span class="data-meta" id="chartDataMeta"></span></div>
         <div class="chart-switch" id="chartSwitch">
           <button class="switch-btn active" data-type="minute">分时</button>
           <button class="switch-btn" data-type="day">日K</button>
@@ -58,14 +58,14 @@
 
     <!-- 市场概况 -->
     <section class="section card" id="overviewSection">
-      <div class="section-head"><h2 id="overviewTitle">市场概况</h2></div>
+      <div class="section-head"><div class="section-heading"><h2 id="overviewTitle">市场概况</h2><span class="data-meta" id="overviewDataMeta"></span></div></div>
       <div id="overviewContent"></div>
     </section>
 
     <!-- 板块（仅A股） -->
     <section class="section card" id="sectorSection">
       <div class="section-head">
-        <h2>行业板块</h2>
+        <div class="section-heading"><h2>行业板块</h2><span class="data-meta" id="sectorDataMeta"></span></div>
         <div class="chart-switch" id="sectorSwitch">
           <button class="switch-btn active" data-view="map">涨跌</button>
           <button class="switch-btn" data-view="flow">资金</button>
@@ -163,6 +163,14 @@
         <span class="modal-time" id="mTime"></span>
       </div>
       <div class="modal-stats" id="mStats"></div>
+      <section class="research-card" id="mResearch" aria-labelledby="mResearchTitle" aria-live="polite" aria-busy="false">
+        <div class="research-head">
+          <h3 id="mResearchTitle">研究卡</h3>
+          <span class="research-benchmark" id="mResearchBenchmark"></span>
+          <span class="data-meta" id="mResearchMeta"></span>
+        </div>
+        <div class="research-body" id="mResearchBody"></div>
+      </section>
       <div class="modal-book" id="mBook" style="display:none"></div>
       <div class="chart-switch modal-switch" id="mChartSwitch">
         <button class="switch-btn active" data-type="minute">分时</button>
@@ -170,6 +178,7 @@
         <button class="switch-btn" data-type="week">周K</button>
         <button class="switch-btn" data-type="month">月K</button>
       </div>
+      <span class="data-meta modal-chart-meta" id="mChartMeta"></span>
       <div id="mChart" class="modal-chart"></div>
     </div>
   </div>

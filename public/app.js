@@ -93,7 +93,52 @@ function fmtVol(v) {
 async function api(path) {
   const res = await fetch(path);
   if (!res.ok) throw new Error(`${path} -> ${res.status}`);
-  return res.json();
+  const body = await res.json();
+  if (body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'data') && body.meta) {
+    const data = body.data;
+    if (data && typeof data === 'object') {
+      Object.defineProperty(data, '_meta', { value: body.meta, configurable: true });
+    }
+    return data;
+  }
+  return body;
+}
+
+const ADJUSTMENT_LABELS = {
+  provider_qfq: '前复权',
+  split_dividend_adjusted: '公司行动调整',
+  partial_adjusted: '部分复权',
+  raw_fallback: '未复权（降级）',
+};
+
+function shortAsOf(value, timezone) {
+  const s = String(value || '');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s.slice(5);
+  const d = new Date(s);
+  if (!Number.isFinite(d.getTime())) return '';
+  return new Intl.DateTimeFormat('zh-CN', {
+    ...(timezone ? { timeZone: timezone } : {}),
+    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+  }).format(d);
+}
+
+function setDataMeta(el, meta, { showAdjustment = false, showCurrency = false } = {}) {
+  if (!el) return;
+  const parts = [];
+  if (showAdjustment && meta && ADJUSTMENT_LABELS[meta.adjustmentBasis]) {
+    parts.push(ADJUSTMENT_LABELS[meta.adjustmentBasis]);
+  }
+  if (showCurrency && meta && meta.currency) parts.push(`${meta.currency}计价`);
+  const asOf = meta && shortAsOf(meta.asOf, meta.timezone);
+  if (asOf) parts.push(`${meta.asOfBasis === 'fetch_time' ? '抓取' : '截至'} ${asOf}`);
+  if (meta && meta.stale) parts.push('⚠ 缓存数据');
+  el.textContent = parts.join(' · ');
+  el.classList.toggle('stale', !!(meta && meta.stale));
+  el.title = meta
+    ? [`来源：${meta.source || '未知'}`, `抓取：${meta.fetchedAt || '未知'}`,
+       meta.adjustmentCoverage != null ? `复权覆盖：${(meta.adjustmentCoverage * 100).toFixed(1)}%` : '']
+      .filter(Boolean).join('\n')
+    : '';
 }
 
 /* ---------- 交易时段判断（按市场时区，含少量缓冲） ---------- */
@@ -145,7 +190,9 @@ async function loadIndices() {
   );
   const t = list[0] && list[0].time ? String(list[0].time).replace(/\//g, '-') : '';
   const open = isMarketOpen(state.market);
-  $('#updateTime').textContent = `${open ? '● 盘中' : '○ 已收盘'}${t ? ' · ' + t : ''}`;
+  const stale = list._meta && list._meta.stale;
+  $('#updateTime').textContent = `${open ? '● 盘中' : '○ 已收盘'}${t ? ' · ' + t : ''}${stale ? ' · ⚠ 缓存' : ''}`;
+  $('#updateTime').title = list._meta ? `来源：${list._meta.source || '未知'}\n抓取：${list._meta.fetchedAt || '未知'}` : '';
 }
 
 /* ---------- 走势图 ---------- */
@@ -157,6 +204,7 @@ let chartReq = 0; // 请求序号，防止慢的旧请求覆盖新图
 async function loadChart() {
   const idx = activeIndex();
   $('#chartTitle').textContent = idx.name || '';
+  setDataMeta($('#chartDataMeta'), null);
   if (!state.activeCode) return;
   const req = ++chartReq;
   try {
@@ -168,12 +216,14 @@ async function loadChart() {
         setChartType('day');
         return;
       }
+      setDataMeta($('#chartDataMeta'), d._meta, { showCurrency: true });
       renderMinute(chart, d);
     } else {
       const d = await api(
         `/api/kline?code=${encodeURIComponent(state.activeCode)}&days=120&period=${state.chartType}`
       );
       if (req !== chartReq) return;
+      setDataMeta($('#chartDataMeta'), d._meta, { showAdjustment: true, showCurrency: true });
       renderKline(chart, d);
     }
   } catch (e) {
@@ -411,24 +461,26 @@ async function loadOverview() {
   const d = await api(`/api/overview?market=${market}`);
   if (market !== state.market) return; // 响应回来前切了 tab，丢弃
   const el = $('#overviewContent');
+  setDataMeta($('#overviewDataMeta'), d._meta, { showCurrency: market === 'cn' });
   if (market === 'cn') {
-    $('#overviewTitle').textContent = '市场概况 · 沪深两市';
-    const upW = d.total ? ((d.up / d.total) * 100).toFixed(1) : 50;
-    const yi = d.turnover / 1e4; // 万元 -> 亿
-    const amount = yi >= 1e4 ? (yi / 1e4).toFixed(2) + ' 万亿' : yi.toFixed(0) + ' 亿';
+    $('#overviewTitle').textContent = '市场概况 · A股行业汇总';
+    const upW = d.total ? Math.max(0, Math.min(100, (d.up / d.total) * 100)) : 0;
+    const nonUpW = Math.max(0, 100 - upW);
+    const limitUp = `${d.limitUp}${d.limitCountComplete === false ? '+' : ''}`;
+    const limitDown = `${d.limitDown}${d.limitCountComplete === false ? '+' : ''}`;
     el.innerHTML = `
       <div class="breadth-stats">
         <span class="c-up">上涨 ${d.up} 家</span>
-        <span class="c-down">下跌 ${d.down} 家</span>
+        <span class="c-flat">未上涨 ${d.nonUp} 家</span>
       </div>
       <div class="breadth-bar">
-        <div class="bb-up" style="width:${upW}%"></div>
-        <div class="bb-down" style="width:${100 - upW}%"></div>
+        <div class="bb-up" style="width:${upW.toFixed(1)}%"></div>
+        <div class="bb-non-up" style="width:${nonUpW.toFixed(1)}%"></div>
       </div>
       <div class="overview-chips">
-        <span>涨停 <b class="c-up">${d.limitUp}</b> 家</span>
-        <span>跌停 <b class="c-down">${d.limitDown}</b> 家</span>
-        <span>两市成交 <b>${amount}</b></span>
+        <span>涨停 <b class="c-up">${limitUp}</b> 家</span>
+        <span>跌停 <b class="c-down">${limitDown}</b> 家</span>
+        <span>行业成交汇总 <b>${fmtMoney(d.turnover, 'CNY')}</b></span>
       </div>`;
   } else {
     $('#overviewTitle').textContent = '市场概况 · 宏观情绪';
@@ -464,7 +516,7 @@ function heatColor(t, positive) {
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
-const fmtInflow = (wan) => `${wan >= 0 ? '+' : '-'}${(Math.abs(wan) / 1e4).toFixed(1)}亿`;
+const fmtInflow = (yuan) => `${yuan >= 0 ? '+' : '-'}${(Math.abs(yuan) / 1e8).toFixed(1)}亿`;
 
 function renderSectorMap(mode) {
   if (!sectorMapChart) {
@@ -496,8 +548,8 @@ function renderSectorMap(mode) {
         const d = p.data;
         return (
           `<b>${escapeHtml(d.name)}</b>　<span style="color:${d.chg >= 0 ? UP : DOWN}">${fmtPct(d.chg)}</span>` +
-          `<br/>主力净流入 <span style="color:${d.inflow >= 0 ? UP : DOWN}">${fmtInflow(d.inflow)}</span>` +
-          `<br/>成交额 ${(d.value / 1e4).toFixed(0)}亿` +
+          `<br/>估算主力净流入（腾讯口径） <span style="color:${d.inflow >= 0 ? UP : DOWN}">${fmtInflow(d.inflow)}</span>` +
+          `<br/>成交额 ${(d.value / 1e8).toFixed(0)}亿` +
           (d.leader ? `<br/>领涨 ${escapeHtml(d.leader.name)} ${fmtPct(d.leader.changePct)}` : '')
         );
       },
@@ -565,13 +617,16 @@ async function loadSectors() {
   const list = await api('/api/sectors');
   if (state.market !== 'cn') return; // 响应回来前切了 tab，丢弃
   sectorList = list;
+  setDataMeta($('#sectorDataMeta'), list._meta, { showCurrency: true });
   renderSectors();
 }
 
 /* ---------- 涨跌榜 ---------- */
 function renderRank(el, rows) {
+  const currencies = [...new Set(rows.map((s) => s.currency).filter(Boolean))];
+  const priceHead = currencies.length === 1 ? `最新价 · ${escapeHtml(currencies[0])}` : '最新价';
   el.innerHTML =
-    `<tr><th>名称</th><th>最新价</th><th>涨跌幅</th></tr>` +
+    `<tr><th>名称</th><th>${priceHead}</th><th>涨跌幅</th></tr>` +
     rows
       .map(
         (s) => `
@@ -615,12 +670,13 @@ async function loadWatch() {
   const table = $('#watchTable');
   $('#watchEmpty').style.display = list.length ? 'none' : 'block';
   $('#updateTime').textContent = list.length ? `共 ${list.length} 只` : '';
-  if (!list.length) { table.innerHTML = ''; return; }
+  if (!list.length) { table.innerHTML = ''; setDataMeta($('#watchDataMeta'), null); return; }
   let quotes = [];
   try {
     quotes = await api(`/api/quotes?codes=${encodeURIComponent(list.map((s) => s.code).join(','))}`);
   } catch (e) { console.error(e); }
   if (mutation !== watchMutation || state.market !== 'watch') return;
+  setDataMeta($('#watchDataMeta'), quotes._meta);
   const byCode = new Map(quotes.map((q) => [q.code, q]));
   table.innerHTML =
     `<tr><th>名称</th><th>最新价</th><th>涨跌幅</th><th>操作</th></tr>` +
@@ -632,7 +688,7 @@ async function loadWatch() {
         return `
       <tr data-code="${escapeHtml(s.code)}" data-name="${escapeHtml(name)}">
         <td><div class="stock-name">${escapeHtml(name)}</div><div class="stock-code">${escapeHtml(s.code.toUpperCase())}</div></td>
-        <td>${q ? q.price.toFixed(2) : '--'}</td>
+        <td>${q ? `${q.price.toFixed(2)}<div class="stock-code">${escapeHtml(q.currency || '')}</div>` : '--'}</td>
         <td class="${q ? colorCls(q.changePct) : ''}">${q ? fmtPct(q.changePct) : '--'}</td>
         <td><div class="watch-actions">
           <button type="button" class="ask-ai-btn"
@@ -673,13 +729,190 @@ async function loadWatch() {
 }
 
 /* ---------- 个股详情弹窗 ---------- */
-const modal = { code: null, name: '', market: 'cn', chartType: 'minute', req: 0, chart: null };
+const modal = {
+  code: null,
+  name: '',
+  market: 'cn',
+  chartType: 'minute',
+  req: 0,
+  researchReq: 0,
+  researchTimer: null,
+  chart: null,
+};
 
 function fmtBig(v) {
   if (v >= 1e12) return (v / 1e12).toFixed(2) + '万亿';
   if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
   if (v >= 1e4) return (v / 1e4).toFixed(1) + '万';
   return String(Math.round(v));
+}
+
+function fmtMoney(v, currency) {
+  if (!Number.isFinite(Number(v))) return '--';
+  const symbol = { CNY: '¥', HKD: 'HK$', USD: '$' }[currency] || '';
+  return `${symbol}${fmtBig(Number(v))}${currency ? ` ${currency}` : ''}`;
+}
+
+function fmtResearchPct(value) {
+  if (value == null || value === '') return '--';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '--';
+  const digits = Math.abs(n) >= 100 ? 1 : 2;
+  return `${n > 0 ? '+' : ''}${n.toFixed(digits)}%`;
+}
+
+function fmtResearchPoints(value) {
+  if (value == null || value === '') return '--';
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '--';
+  const digits = Math.abs(n) >= 100 ? 1 : 2;
+  return `${n > 0 ? '+' : ''}${n.toFixed(digits)}个百分点`;
+}
+
+function researchMetric({ label, value, valueClass = '', sub = '', subClass = '', title = '' }) {
+  const aria = [label, value, sub, title].filter(Boolean).join('，');
+  return `
+    <div class="research-metric" aria-label="${escapeHtml(aria)}"${title ? ` title="${escapeHtml(title)}"` : ''}>
+      <span class="research-label">${escapeHtml(label)}</span>
+      <span class="research-value ${valueClass}">${escapeHtml(value)}</span>
+      <span class="research-sub ${subClass}">${escapeHtml(sub)}</span>
+    </div>`;
+}
+
+function researchInsufficient(metric) {
+  if (!metric || metric.reason !== 'insufficient_history') return '';
+  return `需${metric.required || '--'}，现${metric.actual || 0}`;
+}
+
+function renderResearchLoading() {
+  const card = $('#mResearch');
+  card.style.display = 'block';
+  card.setAttribute('aria-busy', 'true');
+  $('#mResearchBenchmark').textContent = '';
+  setDataMeta($('#mResearchMeta'), null);
+  $('#mResearchBody').innerHTML = '<div class="research-loading">正在计算复权收益与风险指标…</div>';
+}
+
+function renderResearchCard(data) {
+  const card = $('#mResearch');
+  const benchmarkLabel = data.benchmark && data.benchmark.name
+    ? `相对 ${data.benchmark.name}${data.benchmark.available ? '' : '（暂不可用）'}`
+    : '';
+  $('#mResearchBenchmark').textContent = benchmarkLabel;
+  setDataMeta($('#mResearchMeta'), data._meta, { showAdjustment: true, showCurrency: true });
+
+  const horizonLabels = [['1d', '1日'], ['5d', '5日'], ['20d', '20日'], ['60d', '60日'], ['120d', '120日']];
+  const returns = horizonLabels.map(([key, label]) => {
+    const metric = data.returns && data.returns[key] || {};
+    const assetPct = metric.assetPct;
+    const sub = metric.excessPct == null
+      ? researchInsufficient(metric) || '超额 --'
+      : `超额 ${fmtResearchPoints(metric.excessPct)}`;
+    return researchMetric({
+      label,
+      value: fmtResearchPct(assetPct),
+      valueClass: Number.isFinite(assetPct) ? colorCls(assetPct) : '',
+      sub,
+      subClass: Number.isFinite(metric.excessPct) ? colorCls(metric.excessPct) : '',
+      title: metric.startDate && metric.endDate ? `${metric.startDate} 至 ${metric.endDate}` : sub,
+    });
+  }).join('');
+
+  const range = data.range52 || {};
+  const volatility = data.risk && data.risk.volatility20 || {};
+  const drawdown = data.risk && data.risk.maxDrawdown120 || {};
+  const volume = data.volume20 || {};
+  const drawdownDates = typeof drawdown.peakDate === 'string' && typeof drawdown.troughDate === 'string'
+    ? `${drawdown.peakDate.slice(5)} → ${drawdown.troughDate.slice(5)}`
+    : '峰谷日期 --';
+  const volumeDate = typeof volume.asOf === 'string' ? `完整日 ${volume.asOf.slice(5)}` : '完整日日期 --';
+  const risk = [
+    researchMetric({
+      label: '52周位置',
+      value: range.reason === 'flat_range' ? '持平' : range.positionPct == null ? '--' : `${Number(range.positionPct).toFixed(0)}%`,
+      sub: range.distanceToHighPct == null ? researchInsufficient(range) || '距高 --' : `距高 ${fmtResearchPct(range.distanceToHighPct)}`,
+      subClass: Number.isFinite(range.distanceToHighPct) ? colorCls(range.distanceToHighPct) : '',
+      title: range.high == null ? '历史不足365自然日时不冒充52周区间' : `高 ${range.high} · 低 ${range.low}`,
+    }),
+    researchMetric({
+      label: '20日年化波动',
+      value: volatility.value == null ? '--' : `${Number(volatility.value).toFixed(2)}%`,
+      sub: volatility.value == null ? researchInsufficient(volatility) : `${volatility.observations}个日收益`,
+      title: '20个简单日收益的样本标准差，按252个交易日年化',
+    }),
+    researchMetric({
+      label: '120日最大回撤',
+      value: fmtResearchPct(drawdown.value),
+      valueClass: Number.isFinite(drawdown.value) ? colorCls(drawdown.value) : '',
+      sub: drawdown.value == null ? researchInsufficient(drawdown) : drawdownDates,
+      title: '近120个市场交易区间内，复权收盘价从峰值到谷值的最大跌幅',
+    }),
+    researchMetric({
+      label: '较20日均量',
+      value: volume.value == null ? '--' : `${Number(volume.value).toFixed(2)}倍`,
+      sub: volume.value == null ? researchInsufficient(volume) : volumeDate,
+      title: '最近完整交易日成交量 ÷ 此前20个交易日平均成交量',
+    }),
+    researchMetric({
+      label: '历史覆盖',
+      value: `${data.historySessions || 0}日`,
+      sub: `基准对齐 ${data.alignedSessions || 0}日`,
+      title: '有效复权日线数量，以及按同市场基准交易日历对齐后的数量',
+    }),
+  ].join('');
+
+  const signals = Array.isArray(data.signals) && data.signals.length
+    ? data.signals.map((signal) => `
+      <span class="research-signal ${escapeHtml(signal.severity || 'info')}"
+        aria-label="${escapeHtml([signal.label, signal.detail].filter(Boolean).join('：'))}"
+        title="${escapeHtml(signal.detail || '')}">${escapeHtml(signal.label || '')}</span>`).join('')
+    : '<span class="research-signal info">未触发预设观察项</span>';
+  const degraded = data.quality && data.quality.degraded
+    ? ' 当前复权数据已降级，价格类指标仅供参考。'
+    : '';
+  $('#mResearchBody').innerHTML = `
+    <div class="research-returns">${returns}</div>
+    <div class="research-risk">${risk}</div>
+    <div class="research-signals">${signals}</div>
+    <div class="research-note">超额收益为个股收益减价格指数收益的百分点差，不代表风险调整后 Alpha；量能使用最近完整交易日。${escapeHtml(degraded)}</div>`;
+  card.setAttribute('aria-busy', 'false');
+}
+
+function renderResearchError() {
+  const card = $('#mResearch');
+  card.setAttribute('aria-busy', 'false');
+  $('#mResearchBenchmark').textContent = '';
+  setDataMeta($('#mResearchMeta'), null);
+  $('#mResearchBody').innerHTML = `
+    <div class="research-error">研究数据暂时不可用
+      <button type="button" class="research-retry" data-retry-research>重试</button>
+    </div>`;
+}
+
+function loadModalResearch({ delay = 0 } = {}) {
+  if (!modal.code) return;
+  const code = modal.code;
+  const req = ++modal.researchReq;
+  clearTimeout(modal.researchTimer);
+  modal.researchTimer = null;
+  renderResearchLoading();
+  const run = async () => {
+    modal.researchTimer = null;
+    try {
+      const data = await api(`/api/research?code=${encodeURIComponent(code)}`);
+      if (req !== modal.researchReq || modal.code !== code) return;
+      renderResearchCard(data);
+    } catch (error) {
+      if (req !== modal.researchReq || modal.code !== code) return;
+      console.error('research card error', error);
+      renderResearchError();
+    }
+  };
+  if (delay > 0) {
+    modal.researchTimer = setTimeout(run, delay);
+    return;
+  }
+  return run();
 }
 
 function openStock(code, name = '') {
@@ -696,6 +929,8 @@ function openStock(code, name = '') {
   $('#mStats').innerHTML = '';
   $('#mBook').innerHTML = '';
   $('#mBook').style.display = 'none';
+  $('#mResearch').style.display = 'block';
+  setDataMeta($('#mChartMeta'), null);
   document.querySelectorAll('#mChartSwitch .switch-btn').forEach((b) =>
     b.classList.toggle('active', b.dataset.type === 'minute')
   );
@@ -710,12 +945,16 @@ function openStock(code, name = '') {
   modal.chart.resize();
   loadModalQuote().catch(console.error);
   loadModalChart().catch(console.error);
+  loadModalResearch({ delay: 200 });
 }
 
 function closeStock() {
   $('#stockModal').style.display = 'none';
   modal.code = null;
   modal.req++;
+  modal.researchReq++;
+  clearTimeout(modal.researchTimer);
+  modal.researchTimer = null;
 }
 
 function updateHeartBtn() {
@@ -745,24 +984,26 @@ async function loadModalQuote() {
   $('#mPrice').className = `modal-price ${colorCls(q.change)}`;
   $('#mChg').textContent = `${sign(q.change)}${q.change.toFixed(2)} · ${fmtPct(q.changePct)}`;
   $('#mChg').className = `modal-chg ${colorCls(q.change)}`;
-  $('#mTime').textContent = q.time || '';
+  $('#mTime').textContent = [q.time || '', q.currency || '', q._meta && q._meta.stale ? '⚠ 缓存数据' : '']
+    .filter(Boolean).join(' · ');
+  $('#mTime').title = q._meta ? `来源：${q._meta.source || '未知'}\n抓取：${q._meta.fetchedAt || '未知'}` : '';
   const rows =
     q.market === 'cn'
       ? [
           ['今开', q.open.toFixed(2)], ['昨收', q.prevClose.toFixed(2)],
           ['最高', q.high.toFixed(2)], ['最低', q.low.toFixed(2)],
-          ['成交量', fmtBig(q.volume) + '股'], ['成交额', fmtBig(q.amount)],
+          ['成交量', fmtBig(q.volume) + '股'], ['成交额', fmtMoney(q.amount, q.currency)],
           ['换手率', q.turnoverRate + '%'], ['振幅', q.amplitude + '%'],
           ['市盈率', q.pe || '--'], ['市净率', q.pb || '--'],
-          ['总市值', fmtBig(q.mktcap)],
+          ['总市值', fmtMoney(q.mktcap, q.currency)],
         ]
       : q.market === 'hk'
       ? [
           ['今开', q.open.toFixed(2)], ['昨收', q.prevClose.toFixed(2)],
           ['最高', q.high.toFixed(2)], ['最低', q.low.toFixed(2)],
-          ['成交量', fmtBig(q.volume) + '股'], ['成交额', fmtBig(q.amount)],
+          ['成交量', fmtBig(q.volume) + '股'], ['成交额', fmtMoney(q.amount, q.currency)],
           ['市盈率', q.pe || '--'], ['振幅', q.amplitude + '%'],
-          ['总市值', q.mktcap ? fmtBig(q.mktcap) : '--'],
+          ['总市值', q.mktcap ? fmtMoney(q.mktcap, q.currency) : '--'],
           ['52周最高', q.week52High ? q.week52High.toFixed(2) : '--'],
           ['52周最低', q.week52Low ? q.week52Low.toFixed(2) : '--'],
         ]
@@ -820,12 +1061,14 @@ async function loadModalChart() {
         setModalChartType('day');
         return;
       }
+      setDataMeta($('#mChartMeta'), d._meta, { showCurrency: true });
       renderMinute(modal.chart, d);
     } else {
       const d = await api(
         `/api/kline?code=${encodeURIComponent(modal.code)}&days=120&period=${modal.chartType}`
       );
       if (req !== modal.req) return;
+      setDataMeta($('#mChartMeta'), d._meta, { showAdjustment: true, showCurrency: true });
       renderKline(modal.chart, d);
     }
   } catch (e) {
@@ -927,6 +1170,10 @@ async function switchMarket(market) {
   $('#rankUp').innerHTML = '';
   $('#rankDown').innerHTML = '';
   $('#overviewContent').innerHTML = '';
+  setDataMeta($('#chartDataMeta'), null);
+  setDataMeta($('#overviewDataMeta'), null);
+  setDataMeta($('#sectorDataMeta'), null);
+  if (market !== 'watch') setDataMeta($('#watchDataMeta'), null);
   refreshAll();
 }
 
@@ -1395,6 +1642,9 @@ document.querySelectorAll('#sectorSwitch .switch-btn').forEach((b) =>
 document.querySelectorAll('#mChartSwitch .switch-btn').forEach((b) =>
   b.addEventListener('click', () => setModalChartType(b.dataset.type))
 );
+$('#mResearch').addEventListener('click', (e) => {
+  if (e.target.closest('[data-retry-research]')) loadModalResearch();
+});
 $('#mClose').addEventListener('click', closeStock);
 $('#stockModal').addEventListener('click', (e) => {
   if (e.target === $('#stockModal')) closeStock();

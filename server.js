@@ -29,26 +29,44 @@ function setCachedValue(key, value) {
 }
 
 async function cached(key, ttlMs, fn) {
+  return (await cachedEntry(key, ttlMs, fn)).data;
+}
+
+function cacheResult(entry) {
+  return {
+    data: entry.data,
+    fetchedAt: entry.fetchedAt,
+    stale: !!entry.stale,
+    staleSince: entry.staleSince || null,
+  };
+}
+
+async function cachedEntry(key, ttlMs, fn) {
   const hit = cache.get(key);
   if (hit && hit.expire > Date.now()) {
     setCachedValue(key, hit);
-    return hit.data;
+    return cacheResult(hit);
   }
   if (inflight.has(key)) return inflight.get(key);
   const p = (async () => {
     try {
       const data = await fn();
-      setCachedValue(key, { expire: Date.now() + ttlMs, data });
-      return data;
+      const now = Date.now();
+      const entry = { expire: now + ttlMs, fetchedAt: now, stale: false, data };
+      setCachedValue(key, entry);
+      return cacheResult(entry);
     } catch (err) {
       if (hit) {
         console.error(`[stale] ${key}: ${err.message}，返回上次缓存`);
         // 给失败的上游一个短暂冷却期，避免过期兜底后每个请求都立即重试。
-        setCachedValue(key, {
+        const entry = {
+          ...hit,
           expire: Date.now() + Math.min(ttlMs, 15000),
-          data: hit.data,
-        });
-        return hit.data;
+          stale: true,
+          staleSince: hit.staleSince || Date.now(),
+        };
+        setCachedValue(key, entry);
+        return cacheResult(entry);
       }
       throw err;
     } finally {
@@ -57,6 +75,61 @@ async function cached(key, ttlMs, fn) {
   })();
   inflight.set(key, p);
   return p;
+}
+
+const MARKET_DATA_META = Symbol('marketDataMeta');
+
+function annotateMarketData(data, meta) {
+  if (data && (typeof data === 'object' || typeof data === 'function')) {
+    Object.defineProperty(data, MARKET_DATA_META, {
+      value: { ...(data[MARKET_DATA_META] || {}), ...meta },
+      configurable: true,
+    });
+  }
+  return data;
+}
+
+function getMarketDataMeta(data) {
+  return (data && data[MARKET_DATA_META]) || {};
+}
+
+const MARKET_DEFAULTS = {
+  cn: { currency: 'CNY', timezone: 'Asia/Shanghai' },
+  hk: { currency: 'HKD', timezone: 'Asia/Hong_Kong' },
+  us: { currency: 'USD', timezone: 'America/New_York' },
+};
+
+function marketMeta(entry, spec = {}) {
+  const intrinsic = getMarketDataMeta(entry.data);
+  const market = spec.market || intrinsic.market || null;
+  const defaults = MARKET_DEFAULTS[market] || {};
+  const merged = { ...defaults, ...intrinsic, ...spec };
+  const fetchedAt = new Date(entry.fetchedAt).toISOString();
+  return {
+    schemaVersion: 1,
+    market,
+    source: merged.source || null,
+    currency: Object.prototype.hasOwnProperty.call(merged, 'currency') ? merged.currency : null,
+    timezone: merged.timezone || null,
+    asOf: merged.asOf || fetchedAt,
+    asOfBasis: merged.asOfBasis || (merged.asOf ? 'provider' : 'fetch_time'),
+    fetchedAt,
+    requestedAt: new Date().toISOString(),
+    stale: !!(entry.stale || merged.stale),
+    staleSince: entry.staleSince
+      ? new Date(entry.staleSince).toISOString()
+      : merged.staleSince || null,
+    adjustmentBasis: merged.adjustmentBasis || 'none',
+    amountUnit: merged.amountUnit || null,
+    ...(merged.adjustmentCoverage == null
+      ? {}
+      : { adjustmentCoverage: merged.adjustmentCoverage }),
+    ...(merged.coverage ? { coverage: merged.coverage } : {}),
+  };
+}
+
+function sendMarketJSON(res, entry, spec) {
+  return sendJSON(res, 200, { data: entry.data, meta: marketMeta(entry, spec) });
 }
 
 async function fetchText(url, { referer, encoding = 'utf-8', ua } = {}, attempt = 0) {
@@ -92,6 +165,27 @@ const fmtHKTime = (s) => {
   return m ? `${m[1]}-${m[2]} ${m[3]}` : s;
 };
 
+function isoTencentTime(value, market = 'cn') {
+  const s = String(value || '');
+  if (market === 'hk') {
+    const m = /^(\d{4})\/(\d{2})\/(\d{2}) (\d{2}):(\d{2})(?::(\d{2}))?/.exec(s);
+    return m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || '00'}+08:00` : '';
+  }
+  const m = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})?/.exec(s);
+  return m ? `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6] || '00'}+08:00` : '';
+}
+
+function isoMinuteTime(date, time) {
+  const d = String(date || '');
+  const t = String(time || '');
+  if (!/^\d{8}$/.test(d) || !/^\d{2}:\d{2}$/.test(t)) return '';
+  return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}T${t}:00+08:00`;
+}
+
+function marketForCode(code) {
+  return isCNCode(code) ? 'cn' : isHKCode(code) ? 'hk' : 'us';
+}
+
 // ---------- Yahoo Finance（美股） ----------
 const US_INDICES = [
   { code: '^DJI', name: '道琼斯' },
@@ -125,8 +219,9 @@ function yahooFetch(url) {
   return p;
 }
 
-async function yahooChart(symbol, range, interval) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`;
+async function yahooChart(symbol, range, interval, { adjusted = false } = {}) {
+  const extras = adjusted ? '&includeAdjustedClose=true&events=div%2Csplits' : '';
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}${extras}`;
   const j = JSON.parse(await yahooFetch(url));
   const r = j.chart && j.chart.result && j.chart.result[0];
   if (!r) throw new Error(`yahoo: no data for ${symbol}`);
@@ -148,7 +243,7 @@ async function sparkQuotes(defs) {
   const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbols)}&range=1d&interval=5m`;
   const j = JSON.parse(await yahooFetch(url));
   const results = (j.spark && j.spark.result) || [];
-  return defs.map(({ code, name, unit }) => {
+  const quotes = defs.map(({ code, name, unit }) => {
     const r = results.find((x) => x.symbol === code);
     const m = r && r.response && r.response[0] && r.response[0].meta;
     if (!m) return null;
@@ -158,6 +253,7 @@ async function sparkQuotes(defs) {
       code,
       name: name || m.shortName || m.longName || code,
       unit: unit || '',
+      currency: m.currency || null,
       price,
       prevClose: prev,
       open: 0,
@@ -167,10 +263,25 @@ async function sparkQuotes(defs) {
       low: m.regularMarketDayLow || 0,
       amount: 0,
       time: m.regularMarketTime
-        ? `美东 ${fmtTimeInTZ(m.regularMarketTime, m.exchangeTimezoneName)}`
+        ? `美东 ${fmtTimeInTZ(m.regularMarketTime, m.exchangeTimezoneName || 'America/New_York')}`
         : '',
+      asOf: m.regularMarketTime ? new Date(m.regularMarketTime * 1000).toISOString() : '',
     };
   }).filter(Boolean);
+  const currencies = [...new Set(quotes.map((q) => q.currency).filter(Boolean))];
+  const zones = [...new Set(results
+    .map((r) => r && r.response && r.response[0] && r.response[0].meta)
+    .filter(Boolean)
+    .map((m) => m.exchangeTimezoneName)
+    .filter(Boolean))];
+  return annotateMarketData(quotes, {
+    market: 'us',
+    source: 'Yahoo Finance',
+    currency: currencies.length === 1 ? currencies[0] : null,
+    timezone: zones.length === 1 ? zones[0] : 'America/New_York',
+    asOf: quotes.map((q) => q.asOf).filter(Boolean).sort().at(-1) || '',
+    adjustmentBasis: 'none',
+  });
 }
 
 const getIndicesUS = () => sparkQuotes(US_INDICES);
@@ -180,23 +291,32 @@ async function getMinuteUS(code) {
   const r = await yahooChart(code, '1d', '5m');
   const q = r.indicators.quote[0] || {};
   const ts = r.timestamp || [];
-  const tz = r.meta.exchangeTimezoneName;
+  const tz = r.meta.exchangeTimezoneName || 'America/New_York';
   const points = [];
+  let lastDataTs = null;
   for (let i = 0; i < ts.length; i++) {
     const price = q.close && q.close[i];
     if (price == null) continue;
+    lastDataTs = ts[i];
     points.push({
       t: fmtTimeInTZ(ts[i], tz),
       price: +price.toFixed(2),
       vol: (q.volume && q.volume[i]) || 0,
     });
   }
-  return {
+  return annotateMarketData({
     code,
     date: '',
     prevClose: r.meta.chartPreviousClose || r.meta.previousClose || 0,
     points,
-  };
+  }, {
+    market: 'us',
+    source: 'Yahoo Finance',
+    currency: r.meta.currency || null,
+    timezone: tz || 'America/New_York',
+    asOf: lastDataTs ? new Date(lastDataTs * 1000).toISOString() : '',
+    adjustmentBasis: 'none',
+  });
 }
 
 // 美股K线（Yahoo）
@@ -204,17 +324,17 @@ function yahooRange(days) {
   if (days <= 22) return '1mo';
   if (days <= 66) return '3mo';
   if (days <= 132) return '6mo';
-  return '1y';
+  if (days <= 365) return '1y';
+  return '2y';
 }
 
-async function getKlineUS(code, days, period = 'day') {
-  const interval = { day: '1d', week: '1wk', month: '1mo' }[period];
-  const range =
-    period === 'week' ? '2y' : period === 'month' ? '10y' : yahooRange(days);
-  const r = await yahooChart(code, range, interval);
-  const q = r.indicators.quote[0] || {};
+function parseYahooKline(r) {
+  const q = (r.indicators && r.indicators.quote && r.indicators.quote[0]) || {};
+  const adj =
+    (r.indicators && r.indicators.adjclose && r.indicators.adjclose[0]
+      && r.indicators.adjclose[0].adjclose) || [];
   const ts = r.timestamp || [];
-  const tz = r.meta.exchangeTimezoneName;
+  const tz = r.meta.exchangeTimezoneName || 'America/New_York';
   const dfmt = new Intl.DateTimeFormat('en-CA', {
     timeZone: tz,
     year: 'numeric',
@@ -222,18 +342,49 @@ async function getKlineUS(code, days, period = 'day') {
     day: '2-digit',
   });
   const out = [];
+  let adjustedCount = 0;
+  const roundPrice = (v) => +v.toFixed(4);
+  const valueAt = (arr, i) => arr && arr[i] != null ? Number(arr[i]) : NaN;
   for (let i = 0; i < ts.length; i++) {
-    if (q.close == null || q.close[i] == null) continue;
+    const rawClose = valueAt(q.close, i);
+    const rawOpen = valueAt(q.open, i);
+    const rawHigh = valueAt(q.high, i);
+    const rawLow = valueAt(q.low, i);
+    if (![rawOpen, rawClose, rawHigh, rawLow].every(Number.isFinite) || rawClose === 0) continue;
+    const adjustedClose = valueAt(adj, i);
+    const hasAdjusted = Number.isFinite(adjustedClose) && adjustedClose > 0;
+    const factor = hasAdjusted ? adjustedClose / rawClose : 1;
+    if (hasAdjusted) adjustedCount++;
     out.push({
       date: dfmt.format(new Date(ts[i] * 1000)),
-      open: +q.open[i].toFixed(2),
-      close: +q.close[i].toFixed(2),
-      high: +q.high[i].toFixed(2),
-      low: +q.low[i].toFixed(2),
-      volume: q.volume[i] || 0,
+      open: roundPrice(rawOpen * factor),
+      close: roundPrice(rawClose * factor),
+      high: roundPrice(rawHigh * factor),
+      low: roundPrice(rawLow * factor),
+      volume: (q.volume && q.volume[i]) || 0,
     });
   }
-  return out;
+  const coverage = out.length ? adjustedCount / out.length : 0;
+  const adjustmentBasis = coverage === 1
+    ? 'split_dividend_adjusted'
+    : coverage === 0 ? 'raw_fallback' : 'partial_adjusted';
+  return annotateMarketData(out, {
+    market: 'us',
+    source: 'Yahoo Finance',
+    currency: r.meta.currency || null,
+    timezone: tz,
+    asOf: out.length ? out[out.length - 1].date : '',
+    adjustmentBasis,
+    adjustmentCoverage: +coverage.toFixed(4),
+  });
+}
+
+async function getKlineUS(code, days, period = 'day') {
+  const interval = { day: '1d', week: '1wk', month: '1mo' }[period];
+  const range =
+    period === 'week' ? '2y' : period === 'month' ? '10y' : yahooRange(days);
+  const r = await yahooChart(code, range, interval, { adjusted: true });
+  return parseYahooKline(r);
 }
 
 // ---------- 指数实时报价（A股/港股：腾讯，GBK 编码） ----------
@@ -255,6 +406,7 @@ async function getIndices(market) {
     out.push({
       code,
       name: f[1],
+      currency: market === 'hk' ? 'HKD' : 'CNY',
       price: num(f[3]),
       prevClose: num(f[4]),
       open: num(f[5]),
@@ -262,11 +414,20 @@ async function getIndices(market) {
       changePct: num(f[32]),
       high: num(f[33]),
       low: num(f[34]),
-      amount: num(f[37]), // 成交额（A股：万元；港股：元）
+      amount: market === 'hk' ? num(f[37]) : num(f[37]) * 1e4, // 统一为元
       time: market === 'hk' ? fmtHKTime(f[30]) : fmtCNTime(f[30]),
+      asOf: isoTencentTime(f[30], market),
     });
   }
-  return out;
+  return annotateMarketData(out, {
+    market,
+    source: '腾讯行情',
+    currency: market === 'hk' ? 'HKD' : 'CNY',
+    timezone: market === 'hk' ? 'Asia/Hong_Kong' : 'Asia/Shanghai',
+    asOf: out.map((q) => q.asOf).filter(Boolean).sort().at(-1) || '',
+    adjustmentBasis: 'none',
+    amountUnit: 'base_currency',
+  });
 }
 
 // ---------- 分时数据（A股/港股：腾讯 / 美股：Yahoo） ----------
@@ -291,7 +452,16 @@ async function getMinute(code) {
     // 腾讯时间格式 "0930" -> "09:30"，与美股格式统一
     return { t: `${t.slice(0, 2)}:${t.slice(2)}`, price: num(price), vol };
   });
-  return { code, date, prevClose, points };
+  const market = isHKCode(code) ? 'hk' : 'cn';
+  const last = points[points.length - 1];
+  return annotateMarketData({ code, date, prevClose, points }, {
+    market,
+    source: '腾讯行情',
+    currency: market === 'hk' ? 'HKD' : 'CNY',
+    timezone: market === 'hk' ? 'Asia/Hong_Kong' : 'Asia/Shanghai',
+    asOf: last ? isoMinuteTime(date, last.t) : '',
+    adjustmentBasis: 'none',
+  });
 }
 
 // ---------- K线数据（A股/港股：腾讯 / 美股：Yahoo，period: day/week/month） ----------
@@ -303,8 +473,10 @@ async function getKline(code, days = 90, period = 'day') {
   const j = JSON.parse(await fetchText(api));
   const node = j.data && j.data[code];
   if (!node) throw new Error('no kline data');
-  const arr = node[`qfq${period}`] || node[period] || [];
-  return arr.map((k) => ({
+  const adjusted = node[`qfq${period}`];
+  const hasAdjusted = Array.isArray(adjusted) && adjusted.length > 0;
+  const arr = hasAdjusted ? adjusted : node[period] || [];
+  const out = arr.map((k) => ({
     date: k[0],
     open: num(k[1]),
     close: num(k[2]),
@@ -312,6 +484,463 @@ async function getKline(code, days = 90, period = 'day') {
     low: num(k[4]),
     volume: num(k[5]),
   }));
+  const market = isHKCode(code) ? 'hk' : 'cn';
+  return annotateMarketData(out, {
+    market,
+    source: '腾讯行情',
+    currency: market === 'hk' ? 'HKD' : 'CNY',
+    timezone: market === 'hk' ? 'Asia/Hong_Kong' : 'Asia/Shanghai',
+    asOf: out.length ? out[out.length - 1].date : '',
+    adjustmentBasis: hasAdjusted ? 'provider_qfq' : 'raw_fallback',
+    adjustmentCoverage: hasAdjusted ? 1 : 0,
+  });
+}
+
+// ---------- 个股研究卡（复权日线 + 同市场价格指数基准） ----------
+const RESEARCH_DAYS = 400;
+const RESEARCH_HORIZONS = [1, 5, 20, 60, 120];
+const RESEARCH_BENCHMARKS = {
+  cn: { code: 'sh000300', name: '沪深300' },
+  hk: { code: 'hkHSI', name: '恒生指数' },
+  us: { code: '^GSPC', name: '标普500' },
+};
+
+const roundMetric = (value, digits = 2) => {
+  if (!Number.isFinite(value)) return null;
+  const factor = 10 ** digits;
+  const rounded = Math.round((value + Number.EPSILON) * factor) / factor;
+  return Object.is(rounded, -0) ? 0 : rounded;
+};
+
+function normalizeDailySeries(rows) {
+  const byDate = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const date = String(row && row.date || '');
+    const close = Number(row && row.close);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(close) || close <= 0) continue;
+    const high = Number(row.high);
+    const low = Number(row.low);
+    const volume = Number(row.volume);
+    byDate.set(date, {
+      date,
+      close,
+      high: Number.isFinite(high) && high > 0 ? high : close,
+      low: Number.isFinite(low) && low > 0 ? low : close,
+      volume: Number.isFinite(volume) && volume >= 0 ? volume : null,
+    });
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+function rowAtOrBefore(rows, date) {
+  let lo = 0, hi = rows.length - 1, found = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].date <= date) {
+      found = rows[mid];
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return found;
+}
+
+// 以基准指数的交易日历为准；股票停牌缺失的日期只向前取最近已知收盘，不使用未来数据。
+function alignToBenchmarkCalendar(stockRows, benchmarkRows) {
+  if (!stockRows.length || !benchmarkRows.length) return [];
+  return benchmarkRows
+    .map((benchmark) => {
+      const stock = rowAtOrBefore(stockRows, benchmark.date);
+      return stock ? {
+        date: benchmark.date,
+        stockDate: stock.date,
+        stockClose: stock.close,
+        benchmarkClose: benchmark.close,
+      } : null;
+    })
+    .filter(Boolean);
+}
+
+function insufficientMetric(required, actual, extra = {}) {
+  return { value: null, reason: 'insufficient_history', required, actual, ...extra };
+}
+
+function computeResearchReturns(aligned, stockRows, benchmarkAvailable) {
+  const standalone = stockRows.map((row) => ({
+    date: row.date,
+    stockDate: row.date,
+    stockClose: row.close,
+  }));
+  const out = {};
+  for (const sessions of RESEARCH_HORIZONS) {
+    const required = sessions + 1;
+    const canCompare = benchmarkAvailable && aligned.length >= required;
+    // 基准覆盖完整时按市场交易日历计算；基准短缺时，个股自身收益仍退回其有效交易日序列。
+    const assetSeries = canCompare || aligned.length >= required ? aligned : standalone;
+    if (assetSeries.length < required) {
+      out[`${sessions}d`] = {
+        assetPct: null, benchmarkPct: null, excessPct: null,
+        reason: 'insufficient_history', required, actual: assetSeries.length,
+        comparisonReason: benchmarkAvailable ? 'benchmark_insufficient_history' : 'benchmark_unavailable',
+        benchmarkRequired: required,
+        benchmarkActual: aligned.length,
+      };
+      continue;
+    }
+    const start = assetSeries[assetSeries.length - required];
+    const end = assetSeries[assetSeries.length - 1];
+    const assetPct = (end.stockClose / start.stockClose - 1) * 100;
+    const comparisonStart = canCompare ? aligned[aligned.length - required] : null;
+    const comparisonEnd = canCompare ? aligned[aligned.length - 1] : null;
+    const hasBenchmarkPrices = canCompare
+      && Number.isFinite(comparisonStart.benchmarkClose) && comparisonStart.benchmarkClose > 0
+      && Number.isFinite(comparisonEnd.benchmarkClose) && comparisonEnd.benchmarkClose > 0;
+    const benchmarkPct = hasBenchmarkPrices
+      ? (comparisonEnd.benchmarkClose / comparisonStart.benchmarkClose - 1) * 100
+      : null;
+    out[`${sessions}d`] = {
+      assetPct: roundMetric(assetPct),
+      benchmarkPct: roundMetric(benchmarkPct),
+      // “超额”是同区间简单收益率的百分点差，不表示风险调整后的 alpha。
+      excessPct: hasBenchmarkPrices ? roundMetric(assetPct - benchmarkPct) : null,
+      startDate: start.date,
+      endDate: end.date,
+      calendarBasis: canCompare ? 'benchmark_trading_calendar' : 'asset_trading_calendar',
+      ...(hasBenchmarkPrices ? {} : {
+        comparisonReason: benchmarkAvailable ? 'benchmark_insufficient_history' : 'benchmark_unavailable',
+        benchmarkRequired: required,
+        benchmarkActual: aligned.length,
+      }),
+    };
+  }
+  return out;
+}
+
+function computeAnnualizedVolatility(aligned, stockRows) {
+  const required = 21; // 20个日收益需要21个收盘价
+  const useAligned = aligned.length >= required;
+  const points = useAligned
+    ? aligned.map((row) => ({ date: row.date, close: row.stockClose }))
+    : stockRows.map((row) => ({ date: row.date, close: row.close }));
+  const closes = points.map((row) => row.close);
+  if (closes.length < required) return insufficientMetric(required, closes.length, { annualizationDays: 252 });
+  const sample = closes.slice(-required);
+  const returns = sample.slice(1).map((close, i) => close / sample[i] - 1);
+  const mean = returns.reduce((sum, value) => sum + value, 0) / returns.length;
+  const variance = returns.reduce((sum, value) => sum + (value - mean) ** 2, 0) / (returns.length - 1);
+  return {
+    value: roundMetric(Math.sqrt(variance) * Math.sqrt(252) * 100),
+    observations: returns.length,
+    annualizationDays: 252,
+    asOf: points[points.length - 1].date,
+    calendarBasis: useAligned ? 'benchmark_trading_calendar' : 'asset_trading_calendar',
+  };
+}
+
+function computeMaxDrawdown(aligned, stockRows, sessions = 120) {
+  const required = sessions + 1;
+  const useAligned = aligned.length >= required;
+  const points = useAligned
+    ? aligned.map((row) => ({ date: row.date, close: row.stockClose }))
+    : stockRows.map((row) => ({ date: row.date, close: row.close }));
+  if (points.length < required) return insufficientMetric(required, points.length, { sessions });
+  const sample = points.slice(-required);
+  let peak = sample[0].close;
+  let peakDate = sample[0].date;
+  let worst = 0;
+  let worstPeakDate = peakDate;
+  let troughDate = peakDate;
+  for (const point of sample) {
+    if (point.close > peak) {
+      peak = point.close;
+      peakDate = point.date;
+    }
+    const drawdown = point.close / peak - 1;
+    if (drawdown < worst) {
+      worst = drawdown;
+      worstPeakDate = peakDate;
+      troughDate = point.date;
+    }
+  }
+  return {
+    value: roundMetric(worst * 100),
+    sessions,
+    peakDate: worstPeakDate,
+    troughDate,
+    currentPct: roundMetric((sample[sample.length - 1].close / peak - 1) * 100),
+    asOf: sample[sample.length - 1].date,
+    calendarBasis: useAligned ? 'benchmark_trading_calendar' : 'asset_trading_calendar',
+  };
+}
+
+function compute52WeekRange(stockRows) {
+  if (!stockRows.length) return insufficientMetric(365, 0, { window: '365_calendar_days' });
+  const latest = stockRows[stockRows.length - 1];
+  const latestMs = Date.parse(`${latest.date}T00:00:00Z`);
+  const cutoffMs = latestMs - 365 * 86400000;
+  const firstMs = Date.parse(`${stockRows[0].date}T00:00:00Z`);
+  if (!Number.isFinite(latestMs) || !Number.isFinite(firstMs) || firstMs > cutoffMs) {
+    return insufficientMetric(365, Math.max(0, Math.floor((latestMs - firstMs) / 86400000)), {
+      window: '365_calendar_days',
+    });
+  }
+  const sample = stockRows.filter((row) => Date.parse(`${row.date}T00:00:00Z`) >= cutoffMs);
+  const high = Math.max(...sample.map((row) => row.high));
+  const low = Math.min(...sample.map((row) => row.low));
+  const hasRange = high > low;
+  return {
+    value: roundMetric((latest.close / high - 1) * 100),
+    high: roundMetric(high, 4),
+    low: roundMetric(low, 4),
+    distanceToHighPct: roundMetric((latest.close / high - 1) * 100),
+    distanceAboveLowPct: roundMetric((latest.close / low - 1) * 100),
+    positionPct: hasRange ? roundMetric(((latest.close - low) / (high - low)) * 100) : null,
+    sessions: sample.length,
+    startDate: sample[0].date,
+    endDate: latest.date,
+    window: '365_calendar_days',
+    ...(hasRange ? {} : { reason: 'flat_range' }),
+  };
+}
+
+function computeRelativeVolume(stockRows, { latestBarComplete = true } = {}) {
+  const endIndex = stockRows.length - (latestBarComplete ? 1 : 2);
+  const required = 21;
+  if (endIndex < 20) return insufficientMetric(required, Math.max(0, endIndex + 1), {
+    basis: 'latest_complete_session_vs_prior_20_sessions',
+  });
+  const latest = stockRows[endIndex];
+  const previous = stockRows.slice(endIndex - 20, endIndex)
+    .map((row) => row.volume)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (previous.length < 20 || !Number.isFinite(latest.volume) || latest.volume < 0) {
+    return insufficientMetric(required, previous.length + (Number.isFinite(latest.volume) ? 1 : 0), {
+      basis: 'latest_complete_session_vs_prior_20_sessions',
+    });
+  }
+  const average = previous.reduce((sum, value) => sum + value, 0) / previous.length;
+  if (average <= 0) return { value: null, reason: 'zero_average_volume' };
+  return {
+    value: roundMetric(latest.volume / average),
+    latest: latest.volume,
+    average20: roundMetric(average, 2),
+    asOf: latest.date,
+    excludedPartialSession: !latestBarComplete,
+    basis: 'latest_complete_session_vs_prior_20_sessions',
+  };
+}
+
+function buildResearchSignals(card) {
+  const signals = [];
+  const add = (code, severity, label, detail) => signals.push({ code, severity, label, detail });
+  const volatility = card.risk.volatility20.value;
+  const drawdown = card.risk.maxDrawdown120.value;
+  const volume = card.volume20.value;
+  const range = card.range52.value;
+  const aboveLow = card.range52.distanceAboveLowPct;
+  const excess20 = card.returns['20d'].excessPct;
+  if (card.quality.stale) add('DATA_STALE', 'warning', '个股历史数据为旧缓存', '刷新失败，所有指标应结合数据日期谨慎使用');
+  if (card.benchmark.stale) add('BENCHMARK_STALE', 'warning', '基准历史数据为旧缓存', '相对收益可能未反映最新基准行情');
+  if (card.lastTradeDate < card.analysisAsOf) {
+    add('NO_RECENT_TRADE', 'attention', '最近交易日早于分析日', `最近成交 ${card.lastTradeDate}，已按最后收盘延用至 ${card.analysisAsOf}`);
+  }
+  if (card.comparisonAsOf && card.comparisonAsOf < card.lastTradeDate) {
+    add('BENCHMARK_LAGGING', 'attention', '基准截止日较早', `个股最近交易日 ${card.lastTradeDate}，相对收益统一截止 ${card.comparisonAsOf}`);
+  }
+  if (card.benchmark.available && card.historySessions >= 121 && card.alignedSessions < 121) {
+    add('BENCHMARK_HISTORY_LIMITED', 'info', '基准历史覆盖较短', `仅对齐 ${card.alignedSessions} 个交易日，长期超额收益暂不展示`);
+  }
+  if (volatility != null && volatility >= 40) add('HIGH_VOLATILITY', 'warning', '短期波动偏高', `20日年化波动率 ${volatility}%`);
+  if (drawdown != null && drawdown <= -30) add('DEEP_DRAWDOWN', 'warning', '阶段回撤较深', `近120日最大回撤 ${drawdown}%`);
+  if (excess20 != null && excess20 <= -5) add('UNDERPERFORM_20D', 'attention', '近20日跑输基准', `超额收益 ${excess20}个百分点`);
+  if (volume != null && volume >= 2) add('VOLUME_SURGE', 'info', '最近完整日量能放大', `为此前20日均量的 ${volume} 倍`);
+  if (card.range52.positionPct != null && range != null && range >= -5) {
+    add('NEAR_52W_HIGH', 'info', '接近52周高位', `距52周高点 ${range}%`);
+  }
+  if (card.range52.positionPct != null && aboveLow != null && aboveLow <= 5) {
+    add('NEAR_52W_LOW', 'attention', '接近52周低位', `较52周低点 ${aboveLow}%`);
+  }
+  if (card.range52.reason === 'flat_range') add('FLAT_52W_RANGE', 'info', '52周价格区间无波动', '区间最高价与最低价相同');
+  if (card.historySessions < 121 || card.range52.value == null) {
+    add('INSUFFICIENT_HISTORY', 'info', '部分长期指标数据不足', `当前获得 ${card.historySessions} 个有效交易日`);
+  }
+  return signals;
+}
+
+function computeResearchCard(stockInput, benchmarkInput, options = {}) {
+  const stockRows = normalizeDailySeries(stockInput);
+  const benchmarkRows = normalizeDailySeries(benchmarkInput);
+  if (!stockRows.length) throw new Error('no valid daily history');
+  const latest = stockRows[stockRows.length - 1];
+  // 个股缓存已 stale 时，不用更晚的基准日期把旧价格向前延展，避免伪装成当前估值。
+  const comparableBenchmarkRows = options.stockStale
+    ? benchmarkRows.filter((row) => row.date <= latest.date)
+    : benchmarkRows;
+  const aligned = alignToBenchmarkCalendar(stockRows, comparableBenchmarkRows);
+  const benchmarkAvailable = benchmarkRows.length > 0 && aligned.length > 0;
+  const latestBarComplete = options.latestBarComplete !== false;
+  const completeStockRows = latestBarComplete ? stockRows : stockRows.slice(0, -1);
+  const riskBenchmarkRows = latestBarComplete
+    ? comparableBenchmarkRows
+    : comparableBenchmarkRows.filter((row) => row.date < latest.date);
+  const riskAligned = alignToBenchmarkCalendar(completeStockRows, riskBenchmarkRows);
+  const comparisonAsOf = aligned.length ? aligned[aligned.length - 1].date : null;
+  const analysisAsOf = [latest.date, comparisonAsOf].filter(Boolean).sort().at(-1);
+  const card = {
+    code: options.code || '',
+    market: options.market || null,
+    currency: options.currency || null,
+    analysisAsOf,
+    lastTradeDate: latest.date,
+    comparisonAsOf,
+    latestBarComplete,
+    historySessions: stockRows.length,
+    alignedSessions: aligned.length,
+    latestClose: roundMetric(latest.close, 4),
+    benchmark: {
+      code: options.benchmarkCode || '',
+      name: options.benchmarkName || '',
+      type: 'price_index',
+      available: benchmarkAvailable,
+      asOf: comparisonAsOf,
+      stale: !!options.benchmarkStale,
+      adjustmentBasis: options.benchmarkAdjustmentBasis || null,
+    },
+    returns: computeResearchReturns(aligned, stockRows, benchmarkAvailable),
+    range52: compute52WeekRange(stockRows),
+    risk: {
+      volatility20: computeAnnualizedVolatility(riskAligned, completeStockRows),
+      maxDrawdown120: computeMaxDrawdown(riskAligned, completeStockRows, 120),
+    },
+    volume20: computeRelativeVolume(stockRows, { latestBarComplete }),
+    quality: {
+      adjustmentBasis: options.adjustmentBasis || 'none',
+      degraded: ['raw_fallback', 'partial_adjusted'].includes(options.adjustmentBasis),
+      stale: !!options.stockStale,
+      comparison: {
+        type: 'price_index',
+        adjustmentBasis: options.benchmarkAdjustmentBasis || 'none',
+        stale: !!options.benchmarkStale,
+        // 固定基准均为价格指数，raw 指数点位本身不是公司行动复权降级。
+        degraded: !!options.benchmarkStale,
+        adjustmentRequired: false,
+      },
+    },
+    methodology: {
+      returns: 'provider_adjusted_close_on_benchmark_calendar_with_asset_calendar_fallback',
+      suspendedDays: 'last_known_close_carried_forward_without_lookahead',
+      excess: 'asset_return_minus_price_index_return_percentage_points',
+      volatility: '20_simple_daily_returns_sample_stddev_annualized_252',
+      maxDrawdown: '120_complete_sessions_adjusted_close',
+      range52: '365_calendar_days_adjusted_ohlc',
+      volume: 'latest_complete_session_volume_vs_prior_20_session_average',
+      comparisonBasis: 'provider_adjusted_asset_vs_price_index',
+      partialSessionRisk: 'unfinished_daily_bar_excluded_from_volatility_and_drawdown',
+    },
+  };
+  card.signals = buildResearchSignals(card);
+  if (card.quality.degraded) {
+    card.signals.unshift({
+      code: 'DEGRADED_ADJUSTMENT', severity: 'warning', label: '复权质量降级',
+      detail: `当前价格口径为 ${card.quality.adjustmentBasis}`,
+    });
+  }
+  if (!benchmarkAvailable) {
+    card.signals.unshift({
+      code: 'BENCHMARK_UNAVAILABLE', severity: 'warning', label: '基准暂不可用',
+      detail: '个股收益仍可计算，超额收益暂不展示',
+    });
+  }
+  return card;
+}
+
+function dateInTimezone(timezone, date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(date);
+  const get = (type) => parts.find((part) => part.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
+}
+
+async function getResearchCardEntry(code) {
+  const market = marketForCode(code);
+  const benchmark = RESEARCH_BENCHMARKS[market];
+  const stockPromise = cachedEntry(`k:${code}:${RESEARCH_DAYS}:day`, 300000, () => getKline(code, RESEARCH_DAYS, 'day'));
+  const benchmarkPromise = code === benchmark.code
+    ? stockPromise
+    : cachedEntry(`k:${benchmark.code}:${RESEARCH_DAYS}:day`, 300000, () => getKline(benchmark.code, RESEARCH_DAYS, 'day'));
+  const [stockResult, benchmarkResult] = await Promise.allSettled([stockPromise, benchmarkPromise]);
+  if (stockResult.status === 'rejected') throw stockResult.reason;
+  const stockEntry = stockResult.value;
+  const benchmarkEntry = benchmarkResult.status === 'fulfilled' ? benchmarkResult.value : null;
+  if (!benchmarkEntry) console.error(`[research] ${benchmark.code}: ${benchmarkResult.reason?.message || 'benchmark unavailable'}`);
+  const stockMeta = getMarketDataMeta(stockEntry.data);
+  const benchmarkMeta = benchmarkEntry ? getMarketDataMeta(benchmarkEntry.data) : {};
+  const timezone = stockMeta.timezone || MARKET_DEFAULTS[market].timezone;
+  const stockRows = normalizeDailySeries(stockEntry.data);
+  const latestDate = stockRows.length ? stockRows[stockRows.length - 1].date : '';
+  const latestBarComplete = !(latestDate && latestDate === dateInTimezone(timezone) && isMarketOpenSrv(market));
+  const data = computeResearchCard(stockEntry.data, benchmarkEntry ? benchmarkEntry.data : [], {
+    code,
+    market,
+    currency: stockMeta.currency || MARKET_DEFAULTS[market].currency,
+    benchmarkCode: benchmark.code,
+    benchmarkName: benchmark.name,
+    adjustmentBasis: stockMeta.adjustmentBasis,
+    benchmarkAdjustmentBasis: benchmarkMeta.adjustmentBasis,
+    stockStale: stockEntry.stale,
+    benchmarkStale: benchmarkEntry && benchmarkEntry.stale,
+    latestBarComplete,
+  });
+  if (!latestBarComplete) {
+    data.signals.unshift({
+      code: 'PARTIAL_SESSION', severity: 'info', label: '当前交易日尚未结束',
+      detail: '量能、波动率和最大回撤已自动使用最近完整交易日；阶段收益可包含盘中日线',
+    });
+  }
+  const entries = [stockEntry, benchmarkEntry].filter(Boolean);
+  const staleEntries = entries.filter((entry) => entry.stale);
+  const fetchedAt = Math.min(...entries.map((entry) => entry.fetchedAt));
+  const staleSinceValues = staleEntries.map((entry) => entry.staleSince).filter(Number.isFinite);
+  const source = [...new Set([stockMeta.source, benchmarkMeta.source].filter(Boolean))].join(' / ') || null;
+  annotateMarketData(data, {
+    market,
+    source,
+    currency: stockMeta.currency || MARKET_DEFAULTS[market].currency,
+    timezone,
+    asOf: data.analysisAsOf,
+    adjustmentBasis: stockMeta.adjustmentBasis || 'none',
+    ...(stockMeta.adjustmentCoverage == null ? {} : { adjustmentCoverage: stockMeta.adjustmentCoverage }),
+    stale: staleEntries.length > 0,
+    staleSince: staleSinceValues.length ? new Date(Math.min(...staleSinceValues)).toISOString() : null,
+    coverage: {
+      assetBars: data.historySessions,
+      alignedSessions: data.alignedSessions,
+      benchmark: data.benchmark.available ? 'price_index_calendar_aligned' : 'unavailable',
+      components: {
+        asset: {
+          asOf: stockMeta.asOf || data.analysisAsOf,
+          fetchedAt: new Date(stockEntry.fetchedAt).toISOString(),
+          stale: !!stockEntry.stale,
+          adjustmentBasis: stockMeta.adjustmentBasis || 'none',
+        },
+        benchmark: benchmarkEntry ? {
+          code: benchmark.code,
+          asOf: benchmarkMeta.asOf || data.benchmark.asOf,
+          fetchedAt: new Date(benchmarkEntry.fetchedAt).toISOString(),
+          stale: !!benchmarkEntry.stale,
+          adjustmentBasis: benchmarkMeta.adjustmentBasis || 'none',
+        } : { code: benchmark.code, unavailable: true },
+      },
+    },
+  });
+  return {
+    data,
+    fetchedAt,
+    stale: staleEntries.length > 0,
+    staleSince: staleSinceValues.length ? Math.min(...staleSinceValues) : null,
+  };
 }
 
 // ---------- 行业板块（腾讯） ----------
@@ -327,9 +956,10 @@ async function getSectors() {
     return {
       code: s.code,
       name: s.name,
+      currency: 'CNY',
       changePct: num(s.zdf),
-      turnover: num(s.turnover), // 成交额（万元）
-      inflow: num(s.zljlr), // 主力净流入（万元，可为负）
+      turnover: num(s.turnover) * 1e4, // 成交额统一为元
+      inflow: num(s.zljlr) * 1e4, // 供应商估算主力净流入，统一为元（可为负）
       up,
       total,
       leader: s.lzg
@@ -338,7 +968,15 @@ async function getSectors() {
     };
   });
   list.sort((a, b) => b.changePct - a.changePct);
-  return list;
+  return annotateMarketData(list, {
+    market: 'cn',
+    source: '腾讯行情',
+    currency: 'CNY',
+    timezone: 'Asia/Shanghai',
+    adjustmentBasis: 'none',
+    amountUnit: 'base_currency',
+    coverage: { fundFlow: 'provider_estimate' },
+  });
 }
 
 // ---------- 涨跌幅榜 ----------
@@ -351,7 +989,7 @@ async function getRankCN(dir, count = 20) {
   const j = JSON.parse(
     await fetchText(url, { referer: 'https://finance.sina.com.cn' })
   );
-  return (j || [])
+  const out = (j || [])
     .filter((s) =>
       num(s.trade) >= 1 && num(s.amount) >= 2e7 && !isAbnormalCNName(s.name)
     )
@@ -359,12 +997,17 @@ async function getRankCN(dir, count = 20) {
     .map((s) => ({
       code: s.symbol,
       name: s.name,
+      currency: 'CNY',
       price: num(s.trade),
       change: num(s.pricechange),
       changePct: num(s.changepercent),
       amount: num(s.amount),
       turnover: num(s.turnoverratio),
     }));
+  return annotateMarketData(out, {
+    market: 'cn', source: '新浪财经', currency: 'CNY', timezone: 'Asia/Shanghai',
+    adjustmentBasis: 'none', amountUnit: 'base_currency',
+  });
 }
 
 // 美股涨跌榜（Yahoo 预置筛选器，已按价格/成交量过滤掉仙股）
@@ -374,14 +1017,21 @@ async function getRankUS(dir, count = 20) {
   const j = JSON.parse(await yahooFetch(url));
   const quotes =
     (j.finance && j.finance.result && j.finance.result[0] && j.finance.result[0].quotes) || [];
-  return quotes.slice(0, count).map((q) => ({
+  const out = quotes.slice(0, count).map((q) => ({
     code: q.symbol,
     name: q.shortName || q.longName || q.symbol,
+    currency: q.currency || 'USD',
     price: num(q.regularMarketPrice),
     change: num(q.regularMarketChange),
     changePct: num(q.regularMarketChangePercent),
     market: q.fullExchangeName || '',
   }));
+  const currencies = [...new Set(out.map((q) => q.currency).filter(Boolean))];
+  return annotateMarketData(out, {
+    market: 'us', source: 'Yahoo Finance',
+    currency: currencies.length === 1 ? currencies[0] : null,
+    timezone: 'America/New_York', adjustmentBasis: 'none',
+  });
 }
 
 // 港股涨跌榜（新浪）。num 上限60且接口无质量筛选：取3页按序过滤，
@@ -406,15 +1056,26 @@ async function getRankHK(dir, count = 20) {
       out.push({
         code: 'hk' + s.symbol,
         name: s.name,
+        currency: 'HKD',
         price,
         change: num(s.pricechange),
         changePct: num(s.changepercent),
         amount: num(s.amount), // 港元
       });
-      if (out.length >= count) return out;
+      if (out.length >= count) {
+        return annotateMarketData(out, {
+          market: 'hk', source: '新浪财经', currency: 'HKD',
+          timezone: 'Asia/Hong_Kong', adjustmentBasis: 'none',
+          amountUnit: 'base_currency',
+        });
+      }
     }
   }
-  return out;
+  return annotateMarketData(out, {
+    market: 'hk', source: '新浪财经', currency: 'HKD',
+    timezone: 'Asia/Hong_Kong', adjustmentBasis: 'none',
+    amountUnit: 'base_currency',
+  });
 }
 
 // ---------- 个股详情报价 ----------
@@ -424,9 +1085,10 @@ async function getQuote(code) {
     const m = r.meta;
     const prev = m.chartPreviousClose || m.previousClose || 0;
     const price = m.regularMarketPrice || 0;
-    return {
+    return annotateMarketData({
       code,
       market: 'us',
+      currency: m.currency || null,
       name: m.longName || m.shortName || code,
       price,
       prevClose: prev,
@@ -439,9 +1101,15 @@ async function getQuote(code) {
       week52High: m.fiftyTwoWeekHigh || 0,
       week52Low: m.fiftyTwoWeekLow || 0,
       time: m.regularMarketTime
-        ? `美东 ${fmtTimeInTZ(m.regularMarketTime, m.exchangeTimezoneName)}`
+        ? `美东 ${fmtTimeInTZ(m.regularMarketTime, m.exchangeTimezoneName || 'America/New_York')}`
         : '',
-    };
+      asOf: m.regularMarketTime ? new Date(m.regularMarketTime * 1000).toISOString() : '',
+    }, {
+      market: 'us', source: 'Yahoo Finance', currency: m.currency || null,
+      timezone: m.exchangeTimezoneName || 'America/New_York',
+      asOf: m.regularMarketTime ? new Date(m.regularMarketTime * 1000).toISOString() : '',
+      adjustmentBasis: 'none', amountUnit: 'base_currency',
+    });
   }
   const text = await fetchText(`https://qt.gtimg.cn/q=${code}`, { encoding: 'gbk' });
   const m = text.match(new RegExp(`v_${code}="([^"]*)"`));
@@ -450,9 +1118,10 @@ async function getQuote(code) {
   if (isHKCode(code)) {
     // 港股字段与A股大体一致，但单位不同：成交量是股（非手）、成交额是港元（非万元）；
     // f[38] 换手率恒为0、f[46] 是英文名（非市净率）——不返回这两项；盘口量恒为0，也不返回
-    return {
+    return annotateMarketData({
       code,
       market: 'hk',
+      currency: 'HKD',
       name: f[1],
       price: num(f[3]),
       prevClose: num(f[4]),
@@ -469,14 +1138,20 @@ async function getQuote(code) {
       week52High: num(f[48]),
       week52Low: num(f[49]),
       time: fmtHKTime(f[30]),
-    };
+      asOf: isoTencentTime(f[30], 'hk'),
+    }, {
+      market: 'hk', source: '腾讯行情', currency: 'HKD', timezone: 'Asia/Hong_Kong',
+      asOf: isoTencentTime(f[30], 'hk'), adjustmentBasis: 'none',
+      amountUnit: 'base_currency',
+    });
   }
   // 五档盘口：f[9..18] 买一~买五 价/量，f[19..28] 卖一~卖五 价/量（量单位：手）
   const level5 = (start) =>
     [0, 1, 2, 3, 4].map((i) => [num(f[start + i * 2]), num(f[start + i * 2 + 1])]);
-  return {
+  return annotateMarketData({
     code,
     market: 'cn',
+    currency: 'CNY',
     bids: level5(9),
     asks: level5(19),
     name: f[1],
@@ -495,7 +1170,12 @@ async function getQuote(code) {
     mktcap: num(f[45]) * 1e8, // 亿 -> 元
     pb: num(f[46]),
     time: fmtCNTime(f[30]),
-  };
+    asOf: isoTencentTime(f[30], 'cn'),
+  }, {
+    market: 'cn', source: '腾讯行情', currency: 'CNY', timezone: 'Asia/Shanghai',
+    asOf: isoTencentTime(f[30], 'cn'), adjustmentBasis: 'none',
+    amountUnit: 'base_currency',
+  });
 }
 
 // 批量简要报价（自选股列表用）。A股+港股可以合并在一次腾讯请求里
@@ -514,10 +1194,13 @@ async function getQuotes(codes) {
           out.set(code, {
             code,
             market: isHKCode(code) ? 'hk' : 'cn',
+            currency: isHKCode(code) ? 'HKD' : 'CNY',
             name: f[1],
             price: num(f[3]),
             change: num(f[31]),
             changePct: num(f[32]),
+            time: isHKCode(code) ? fmtHKTime(f[30]) : fmtCNTime(f[30]),
+            asOf: isoTencentTime(f[30], isHKCode(code) ? 'hk' : 'cn'),
           });
         }
       })
@@ -531,7 +1214,14 @@ async function getQuotes(codes) {
     );
   }
   await Promise.all(jobs);
-  return codes.map((c) => out.get(c)).filter(Boolean);
+  return annotateMarketData(codes.map((c) => out.get(c)).filter(Boolean), {
+    market: null,
+    source: tx.length && us.length ? '腾讯行情 / Yahoo Finance' : tx.length ? '腾讯行情' : 'Yahoo Finance',
+    currency: null,
+    timezone: null,
+    asOf: [...out.values()].map((q) => q.asOf).filter(Boolean).sort().at(-1) || '',
+    adjustmentBasis: 'none',
+  });
 }
 
 // ---------- 个股搜索（腾讯 smartbox，支持代码/中文/拼音） ----------
@@ -567,37 +1257,93 @@ async function searchStocks(q) {
 }
 
 // ---------- 市场概况 ----------
-// 数涨停/跌停：按涨跌幅排序翻页统计（主板 ±10%、创业/科创 ±20%，不含 ST）
+// 涨跌幅限制：沪深主板10%、创业/科创20%、北交所30%（不含ST/新股/退市整理）。
+function cnPriceLimitPct(symbol) {
+  if (/^bj/.test(symbol || '')) return 30;
+  if (/^(sh68|sz30)/.test(symbol || '')) return 20;
+  return 10;
+}
+
+function isCNPriceLimit(row, dir) {
+  if (!row || num(row.trade) <= 0 || isAbnormalCNName(row.name)) return false;
+  const pct = num(row.changepercent);
+  if ((dir === 'up' && pct <= 0) || (dir === 'down' && pct >= 0)) return false;
+  // 交易所价格按最小报价单位取整，实际涨跌幅可能略低于整数限制。
+  return Math.abs(pct) >= cnPriceLimitPct(row.symbol) - 0.2;
+}
+
+// 按涨跌幅排序翻页统计。不同板块限制不同，北交所约±10%的股票不是涨跌停，
+// 却会排在沪深主板±9.8%之前，因此必须翻到绝对涨跌幅低于9.8%才算完整。
+// 两页一批并行降低延迟；极端行情超过10页时返回下限值并标 complete=false。
 async function countLimit(dir) {
   const asc = dir === 'down' ? 1 : 0;
   let count = 0;
-  for (let page = 1; page <= 3; page++) {
-    const url = `https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=${page}&num=100&sort=changepercent&asc=${asc}&node=hs_a`;
-    const j = JSON.parse(await fetchText(url, { referer: 'https://finance.sina.com.cn' }));
-    if (!Array.isArray(j) || !j.length) break;
-    let pageMin = Infinity;
-    for (const s of j) {
-      if (num(s.trade) <= 0) continue;
-      const pct = Math.abs(num(s.changepercent));
-      pageMin = Math.min(pageMin, pct);
-      const is20cm = /^(sh68|sz30)/.test(s.symbol); // 科创板/创业板 20%
-      if (pct >= (is20cm ? 19.8 : 9.8) && !isAbnormalCNName(s.name)) count++;
+  const seen = new Set();
+  const maxPages = 10;
+  for (let firstPage = 1; firstPage <= maxPages; firstPage += 2) {
+    const pageNumbers = [firstPage, firstPage + 1].filter((page) => page <= maxPages);
+    const pages = await Promise.all(pageNumbers.map(async (page) => {
+      const url = `https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=${page}&num=100&sort=changepercent&asc=${asc}&node=hs_a`;
+      return JSON.parse(await fetchText(url, { referer: 'https://finance.sina.com.cn' }));
+    }));
+    for (const j of pages) {
+      if (!Array.isArray(j) || !j.length) return { count, complete: true };
+      let pageMin = Infinity;
+      for (const s of j) {
+        if (num(s.trade) <= 0) continue;
+        const pct = Math.abs(num(s.changepercent));
+        pageMin = Math.min(pageMin, pct);
+        const id = String(s.symbol || '');
+        if (!seen.has(id) && isCNPriceLimit(s, dir)) count++;
+        if (id) seen.add(id);
+      }
+      if (!Number.isFinite(pageMin) || pageMin < 9.8) return { count, complete: true };
     }
-    if (pageMin < 9.8) break; // 已排序，后面不会再有涨跌停
   }
-  return count;
+  return { count, complete: false };
+}
+
+function summarizeSectorBreadth(sectors) {
+  let up = 0, total = 0, turnover = 0;
+  for (const s of sectors || []) {
+    up += Math.max(0, Number(s.up) || 0);
+    total += Math.max(0, Number(s.total) || 0);
+    turnover += Number(s.turnover) || 0;
+  }
+  up = Math.min(up, total);
+  return { up, nonUp: Math.max(0, total - up), total, turnover };
 }
 
 async function getOverviewCN() {
-  const sectors = await cached('sectors', 30000, getSectors);
-  let up = 0, total = 0, turnover = 0;
-  for (const s of sectors) {
-    up += s.up;
-    total += s.total;
-    turnover += s.turnover;
-  }
+  const sectorEntry = await cachedEntry('sectors', 30000, getSectors);
+  const breadth = summarizeSectorBreadth(sectorEntry.data);
   const [limitUp, limitDown] = await Promise.all([countLimit('up'), countLimit('down')]);
-  return { up, down: total - up, total, turnover, limitUp, limitDown };
+  return annotateMarketData({
+    ...breadth,
+    down: null,
+    flat: null,
+    breadthBasis: 'sector_up_vs_total',
+    limitUp: limitUp.count,
+    limitDown: limitDown.count,
+    limitCountComplete: limitUp.complete && limitDown.complete,
+  }, {
+    market: 'cn',
+    source: '腾讯行情 / 新浪财经',
+    currency: 'CNY',
+    timezone: 'Asia/Shanghai',
+    asOf: new Date(sectorEntry.fetchedAt).toISOString(),
+    asOfBasis: 'fetch_time',
+    stale: sectorEntry.stale,
+    staleSince: sectorEntry.staleSince ? new Date(sectorEntry.staleSince).toISOString() : null,
+    adjustmentBasis: 'none',
+    amountUnit: 'base_currency',
+    coverage: {
+      breadth: '行业上涨家数 / 行业总家数；未上涨包含平盘与停牌',
+      priceLimitRules: '主板10%、创业板/科创板20%、北交所30%',
+      priceLimitExclusions: 'N/C新股、ST、退市整理',
+      priceLimitComplete: limitUp.complete && limitDown.complete,
+    },
+  });
 }
 
 const US_MACRO = [
@@ -872,11 +1618,12 @@ function getLLMConfig() {
 const LLM_TOOLS = [
   { name: 'get_indices', description: '获取大盘指数实时行情。market=cn 返回上证/深成/创业板/沪深300/科创50；market=hk 返回恒生指数/国企指数/恒生科技；market=us 返回道琼斯/纳斯达克/标普500', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] } }, required: ['market'] } },
   { name: 'get_quote', description: '获取单只股票的详细实时报价（价格、涨跌幅、成交量额、换手率、市盈率、市值、五档盘口等）。A股代码格式如 sh600519/sz300750，港股如 hk00700，美股代码如 AAPL/TSLA，也支持 ^VIX、GC=F 黄金、BTC-USD 等', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
-  { name: 'get_kline', description: '获取股票或指数的K线历史（日K/周K/月K，最近最多40根，含开高低收和成交量）', parameters: { type: 'object', properties: { code: { type: 'string' }, period: { type: 'string', enum: ['day', 'week', 'month'] } }, required: ['code'] } },
+  { name: 'get_kline', description: '获取股票或指数的复权K线历史（日K/周K/月K，最近最多40根，含开高低收和成交量）。meta.adjustmentBasis说明复权口径，meta.stale说明是否为刷新失败后的旧缓存', parameters: { type: 'object', properties: { code: { type: 'string' }, period: { type: 'string', enum: ['day', 'week', 'month'] } }, required: ['code'] } },
+  { name: 'get_research_card', description: '获取个股研究卡：1/5/20/60/120日复权收益、相对同市场价格指数的超额收益、52周位置、20日年化波动率、120日最大回撤和较20日均量。适合回答阶段表现、风险和相对强弱；超额为简单收益率百分点差，不是风险调整后Alpha。若meta.stale=true或signals提示旧缓存，回答必须明确数据日期和缓存状态', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
   { name: 'get_intraday', description: '获取当日分时走势（抽样点位），可用于判断盘中走势形态', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
-  { name: 'get_sectors', description: '获取A股31个申万行业板块的涨跌幅、主力资金净流入（亿元）和领涨股，可判断市场热点和资金流向', parameters: { type: 'object', properties: {} } },
+  { name: 'get_sectors', description: '获取A股行业板块涨跌幅、腾讯口径估算主力净流入（亿元）和领涨股。资金流是供应商估算值，不能视为可核验的真实资金流', parameters: { type: 'object', properties: {} } },
   { name: 'get_rank', description: '获取涨幅榜或跌幅榜个股。market=cn 沪深两市，market=hk 港股，market=us 美股', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] }, dir: { type: 'string', enum: ['up', 'down'] } }, required: ['market', 'dir'] } },
-  { name: 'get_overview', description: '获取市场概况。market=cn 返回涨跌家数、涨停跌停数、两市成交额；market=us 返回VIX恐慌指数、美债收益率、美元指数、黄金、原油、比特币', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'us'] } }, required: ['market'] } },
+  { name: 'get_overview', description: '获取市场概况。market=cn 返回上涨/未上涨家数、涨停跌停数和成交额（未上涨包含平盘与停牌）；market=us 返回VIX、美债收益率、美元、黄金、原油、比特币', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'us'] } }, required: ['market'] } },
   { name: 'get_news', description: '获取最新财经新闻标题列表（新浪财经滚动要闻）', parameters: { type: 'object', properties: {} } },
   { name: 'get_stock_events', description: '检索指定A股最近的个股候选相关资讯。回答涨停、跌停、异动、消息面或催化剂问题时必须调用；返回标题、北京时间、来源、链接和关联类型。资讯是外部证据，不代表已确认因果', parameters: { type: 'object', properties: { code: { type: 'string', description: '带 sh/sz/bj 前缀的A股代码' }, lookbackHours: { type: 'integer', minimum: 6, maximum: 168, description: '回溯小时数，默认72' } }, required: ['code'] } },
   { name: 'search_stock', description: '按名称/代码/拼音搜索股票，返回股票代码。回答个股问题前如果不确定代码，先用这个工具查', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
@@ -886,46 +1633,69 @@ async function runLLMTool(name, args) {
   switch (name) {
     case 'get_indices': {
       const m = args.market === 'us' || args.market === 'hk' ? args.market : 'cn';
-      return cached(`idx:${m}`, 15000, () => getIndices(m));
+      const entry = await cachedEntry(`idx:${m}`, 15000, () => getIndices(m));
+      return { data: entry.data, meta: marketMeta(entry, { market: m }) };
     }
     case 'get_quote': {
       const code = sanitizeCode(args.code || '');
-      return cached(`q:${code}`, 15000, () => getQuote(code));
+      const entry = await cachedEntry(`q:${code}`, 15000, () => getQuote(code));
+      return { data: entry.data, meta: marketMeta(entry, { market: marketForCode(code) }) };
     }
     case 'get_kline': {
       const code = sanitizeCode(args.code || '');
       const period = ['day', 'week', 'month'].includes(args.period) ? args.period : 'day';
-      const data = await cached(`k:${code}:120:${period}`, 300000, () => getKline(code, 120, period));
-      return data.slice(-40);
+      const entry = await cachedEntry(`k:${code}:120:${period}`, 300000, () => getKline(code, 120, period));
+      return {
+        data: entry.data.slice(-40),
+        meta: marketMeta(entry, { market: marketForCode(code) }),
+      };
+    }
+    case 'get_research_card': {
+      const code = sanitizeCode(args.code || '');
+      if (!code) throw new Error('code required');
+      const entry = await getResearchCardEntry(code);
+      return {
+        data: entry.data,
+        meta: marketMeta(entry, { market: marketForCode(code) }),
+      };
     }
     case 'get_intraday': {
       const code = sanitizeCode(args.code || '');
-      const d = await cached(`min:${code}`, isTXCode(code) ? 30000 : 60000, () => getMinute(code));
+      const entry = await cachedEntry(`min:${code}`, isTXCode(code) ? 30000 : 60000, () => getMinute(code));
+      const d = entry.data;
       // 抽样：每10个点取1个 + 最后一个点，控制token
       const pts = d.points.filter((_, i) => i % 10 === 0);
       if (d.points.length) pts.push(d.points[d.points.length - 1]);
-      return { code: d.code, prevClose: d.prevClose, points: pts.map((p) => ({ t: p.t, price: p.price })) };
+      return {
+        data: { code: d.code, prevClose: d.prevClose, points: pts.map((p) => ({ t: p.t, price: p.price })) },
+        meta: marketMeta(entry, { market: marketForCode(code) }),
+      };
     }
     case 'get_sectors': {
-      const list = await cached('sectors', 30000, getSectors);
-      return list.map((s) => ({
-        name: s.name,
-        changePct: s.changePct,
-        inflowYi: +(s.inflow / 1e4).toFixed(2),
-        leader: s.leader ? `${s.leader.name} ${s.leader.changePct}%` : '',
-      }));
+      const entry = await cachedEntry('sectors', 30000, getSectors);
+      return {
+        data: entry.data.map((s) => ({
+          name: s.name,
+          changePct: s.changePct,
+          estimatedInflowYi: +(s.inflow / 1e8).toFixed(2),
+          leader: s.leader ? `${s.leader.name} ${s.leader.changePct}%` : '',
+        })),
+        meta: marketMeta(entry, { market: 'cn' }),
+      };
     }
     case 'get_rank': {
       const m = args.market === 'us' || args.market === 'hk' ? args.market : 'cn';
       const dir = args.dir === 'down' ? 'down' : 'up';
       const fn = m === 'us' ? getRankUS : m === 'hk' ? getRankHK : getRankCN;
       const ttl = !isMarketOpenSrv(m) ? 600000 : m === 'us' ? 90000 : 30000;
-      return cached(`rank:${m}:${dir}`, ttl, () => fn(dir));
+      const entry = await cachedEntry(`rank:${m}:${dir}`, ttl, () => fn(dir));
+      return { data: entry.data, meta: marketMeta(entry, { market: m }) };
     }
     case 'get_overview': {
       const m = args.market === 'us' ? 'us' : 'cn';
       const fn = m === 'us' ? getOverviewUS : getOverviewCN;
-      return cached(`overview:${m}`, 60000, fn);
+      const entry = await cachedEntry(`overview:${m}`, 60000, fn);
+      return { data: entry.data, meta: marketMeta(entry, { market: m, ...(m === 'us' ? { currency: null } : {}) }) };
     }
     case 'get_news':
       return cached('news', 180000, () => getNews());
@@ -1112,8 +1882,6 @@ function migrateChatSessionIds() {
   store.sessions = sessions;
   if (changed) writeChats(store);
 }
-migrateChatSessionIds();
-
 function sseSend(res, obj) {
   res.write(`data: ${JSON.stringify(obj)}\n\n`);
 }
@@ -1460,22 +2228,32 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/indices') {
       const q = u.searchParams.get('market');
       const market = q === 'us' || q === 'hk' ? q : 'cn';
-      return sendJSON(res, 200, await cached(`idx:${market}`, 15000, () => getIndices(market)));
+      const entry = await cachedEntry(`idx:${market}`, 15000, () => getIndices(market));
+      return sendMarketJSON(res, entry, { market });
     }
     if (p === '/api/minute') {
       const code = sanitizeCode(u.searchParams.get('code') || 'sh000001');
       const ttl = isTXCode(code) ? 30000 : 60000;
-      return sendJSON(res, 200, await cached(`min:${code}`, ttl, () => getMinute(code)));
+      const entry = await cachedEntry(`min:${code}`, ttl, () => getMinute(code));
+      return sendMarketJSON(res, entry, { market: marketForCode(code) });
     }
     if (p === '/api/kline') {
       const code = sanitizeCode(u.searchParams.get('code') || 'sh000001');
       const days = Math.min(365, parseInt(u.searchParams.get('days') || '90', 10) || 90);
       const q = u.searchParams.get('period');
       const period = ['day', 'week', 'month'].includes(q) ? q : 'day';
-      return sendJSON(res, 200, await cached(`k:${code}:${days}:${period}`, 300000, () => getKline(code, days, period)));
+      const entry = await cachedEntry(`k:${code}:${days}:${period}`, 300000, () => getKline(code, days, period));
+      return sendMarketJSON(res, entry, { market: marketForCode(code) });
+    }
+    if (p === '/api/research') {
+      const code = sanitizeCode(u.searchParams.get('code') || '');
+      if (!code) return sendJSON(res, 400, { error: 'code required' });
+      const entry = await getResearchCardEntry(code);
+      return sendMarketJSON(res, entry, { market: marketForCode(code) });
     }
     if (p === '/api/sectors') {
-      return sendJSON(res, 200, await cached('sectors', 30000, getSectors));
+      const entry = await cachedEntry('sectors', 30000, getSectors);
+      return sendMarketJSON(res, entry, { market: 'cn' });
     }
     if (p === '/api/rank') {
       const q = u.searchParams.get('market');
@@ -1484,7 +2262,8 @@ const server = http.createServer(async (req, res) => {
       const fn = market === 'us' ? getRankUS : market === 'hk' ? getRankHK : getRankCN;
       // 收盘后榜单不再变化，拉长 TTL 免得反复冷启动（港股上游要 ~5s）；盘中 TTL 与 warmCaches 一致
       const ttl = !isMarketOpenSrv(market) ? 600000 : market === 'us' ? 90000 : 30000;
-      return sendJSON(res, 200, await cached(`rank:${market}:${dir}`, ttl, () => fn(dir)));
+      const entry = await cachedEntry(`rank:${market}:${dir}`, ttl, () => fn(dir));
+      return sendMarketJSON(res, entry, { market });
     }
     // LLM 配置（Key 只存服务器，GET 仅返回掩码）
     if (p === '/api/llm-config') {
@@ -1622,7 +2401,8 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/quote') {
       const code = sanitizeCode(u.searchParams.get('code') || '');
       if (!code) return sendJSON(res, 400, { error: 'code required' });
-      return sendJSON(res, 200, await cached(`q:${code}`, 15000, () => getQuote(code)));
+      const entry = await cachedEntry(`q:${code}`, 15000, () => getQuote(code));
+      return sendMarketJSON(res, entry, { market: marketForCode(code) });
     }
     if (p === '/api/quotes') {
       const codes = (u.searchParams.get('codes') || '')
@@ -1630,9 +2410,15 @@ const server = http.createServer(async (req, res) => {
         .map(sanitizeCode)
         .filter(Boolean)
         .slice(0, 50);
-      if (!codes.length) return sendJSON(res, 200, []);
+      if (!codes.length) {
+        const now = Date.now();
+        return sendMarketJSON(res, { data: [], fetchedAt: now, stale: false, staleSince: null }, {
+          market: null, source: null, currency: null, timezone: null,
+        });
+      }
       const key = `qs:${codes.join(',')}`;
-      return sendJSON(res, 200, await cached(key, 30000, () => getQuotes(codes)));
+      const entry = await cachedEntry(key, 30000, () => getQuotes(codes));
+      return sendMarketJSON(res, entry, { market: null, currency: null, timezone: null });
     }
     if (p === '/api/search') {
       const q = (u.searchParams.get('q') || '').trim().slice(0, 20);
@@ -1642,7 +2428,11 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/overview') {
       const market = u.searchParams.get('market') === 'us' ? 'us' : 'cn';
       const fn = market === 'us' ? getOverviewUS : getOverviewCN;
-      return sendJSON(res, 200, await cached(`overview:${market}`, 60000, fn));
+      const entry = await cachedEntry(`overview:${market}`, 60000, fn);
+      return sendMarketJSON(res, entry, {
+        market,
+        ...(market === 'us' ? { currency: null } : {}),
+      });
     }
     if (p === '/api/news') {
       return sendJSON(res, 200, await cached('news', 180000, () => getNews()));
@@ -1716,9 +2506,35 @@ function warmCaches() {
     warm('news', 180000, () => getNews());
   }
 }
-if (process.env.MARKET_DISABLE_WARM !== '1') setInterval(warmCaches, 25000);
+function startServer() {
+  migrateChatSessionIds();
+  if (process.env.MARKET_DISABLE_WARM !== '1') setInterval(warmCaches, 25000);
+  return server.listen(PORT, () => {
+    console.log(`行情看板已启动: http://localhost:${PORT}`);
+    if (process.env.MARKET_DISABLE_WARM !== '1') warmCaches();
+  });
+}
 
-server.listen(PORT, () => {
-  console.log(`行情看板已启动: http://localhost:${PORT}`);
-  if (process.env.MARKET_DISABLE_WARM !== '1') warmCaches();
-});
+if (require.main === module) startServer();
+
+module.exports = {
+  cachedEntry,
+  cache,
+  normalizeDailySeries,
+  alignToBenchmarkCalendar,
+  computeResearchReturns,
+  computeAnnualizedVolatility,
+  computeMaxDrawdown,
+  compute52WeekRange,
+  computeRelativeVolume,
+  computeResearchCard,
+  cnPriceLimitPct,
+  isCNPriceLimit,
+  summarizeSectorBreadth,
+  parseYahooKline,
+  getMarketDataMeta,
+  marketMeta,
+  isoTencentTime,
+  server,
+  startServer,
+};
