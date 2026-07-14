@@ -195,17 +195,36 @@ function parseReviewItems(
   return parsedItems;
 }
 
+function parseProminentFields(parsed, aligned) {
+  if (!VALID_STANCES.has(parsed.stance)) throw new Error('AI 盘后复盘 stance 非法');
+  const themes = (Array.isArray(parsed.themes) ? parsed.themes : [])
+    .slice(0, 4)
+    .map((item, index) => requireProminentText(item, `themes[${index}]`, 30));
+  if (themes.length < 2) throw new Error('AI 盘后复盘至少需要两个主题');
+  return {
+    stance: parsed.stance,
+    headline: requireProminentText(parsed.headline, 'headline', 160),
+    cardSummary: requireProminentText(parsed.cardSummary, 'cardSummary', 300),
+    themes,
+    keyRisk: requireProminentText(parsed.keyRisk, 'keyRisk', 180),
+    executiveSummary: requireProminentText(parsed.executiveSummary, 'executiveSummary', 1200),
+    prominentEvidenceRefs: parseProminentEvidenceRefs(
+      parsed.prominentEvidenceRefs, themes.length, aligned,
+    ),
+  };
+}
+
 function parseMarketReview(content, {
   allowedEvidenceRefs = [],
   allowedCitationRefs = [],
   associationEvidenceRefs = [],
   discardInvalidSectionItems = false,
+  prominentFallback = null,
 } = {}) {
   const parsed = parseJSONContent(content);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error('AI 盘后复盘格式异常');
   }
-  if (!VALID_STANCES.has(parsed.stance)) throw new Error('AI 盘后复盘 stance 非法');
   const evidence = allowedEvidenceRefs instanceof Set
     ? allowedEvidenceRefs
     : new Set(allowedEvidenceRefs);
@@ -215,17 +234,18 @@ function parseMarketReview(content, {
   const aligned = associationEvidenceRefs instanceof Set
     ? associationEvidenceRefs
     : new Set(associationEvidenceRefs);
-  const themes = (Array.isArray(parsed.themes) ? parsed.themes : [])
-    .slice(0, 4)
-    .map((item, index) => requireProminentText(item, `themes[${index}]`, 30));
-  if (themes.length < 2) throw new Error('AI 盘后复盘至少需要两个主题');
+  const validationWarnings = [];
+  let prominent;
+  try {
+    prominent = parseProminentFields(parsed, aligned);
+  } catch (error) {
+    if (!prominentFallback) throw error;
+    prominent = parseProminentFields(prominentFallback, aligned);
+    validationWarnings.push({ code: 'prominent_fallback' });
+  }
   if (!parsed.sections || typeof parsed.sections !== 'object' || Array.isArray(parsed.sections)) {
     throw new Error('AI 盘后复盘 sections 格式异常');
   }
-  const prominentEvidenceRefs = parseProminentEvidenceRefs(
-    parsed.prominentEvidenceRefs, themes.length, aligned,
-  );
-  const validationWarnings = [];
   const sections = {};
   for (const [key] of SECTION_DEFS) {
     sections[key] = parseReviewItems(parsed.sections[key], key, evidence, citations, aligned, {
@@ -237,13 +257,7 @@ function parseMarketReview(content, {
     if (!SECTION_KEYS.has(key)) throw new Error(`AI 盘后复盘包含未知 section ${key}`);
   }
   return {
-    stance: parsed.stance,
-    headline: requireProminentText(parsed.headline, 'headline', 160),
-    cardSummary: requireProminentText(parsed.cardSummary, 'cardSummary', 300),
-    themes,
-    keyRisk: requireProminentText(parsed.keyRisk, 'keyRisk', 180),
-    executiveSummary: requireProminentText(parsed.executiveSummary, 'executiveSummary', 1200),
-    prominentEvidenceRefs,
+    ...prominent,
     sections,
     validationWarnings,
   };
@@ -670,6 +684,50 @@ function tone(value) {
   return value > 0 ? 'positive' : 'negative';
 }
 
+function directionText(value, { flat = '接近平收', missing = '方向暂不明确' } = {}) {
+  if (!Number.isFinite(value)) return missing;
+  if (value > 0) return '偏强';
+  if (value < 0) return '偏弱';
+  return flat;
+}
+
+function buildDeterministicProminent(evidence) {
+  const byName = new Map(evidence.components.map((component) => [component.name, component.data]));
+  const indices = byName.get('indices') || [];
+  const histories = byName.get('indexHistory') || [];
+  const primaryCode = PRIMARY_INDEX[evidence.market];
+  const primary = indices.find((row) => row.code === primaryCode) || indices[0];
+  const primaryHistory = histories.find((row) => row.code === primaryCode) || histories[0];
+  const aligned = new Set(evidence.associationEvidenceRefs);
+  const indexRef = aligned.has('indices') ? 'indices' : [...aligned][0];
+  const historyRef = aligned.has('indexHistory') ? 'indexHistory' : indexRef;
+  if (!indexRef || !historyRef) throw new Error('确定性复盘摘要缺少收盘对齐证据');
+
+  const sessionDirection = Number.isFinite(primary && primary.changePct)
+    ? primary.changePct > 0 ? '收涨' : primary.changePct < 0 ? '收跌' : '接近平收'
+    : '收盘方向暂不明确';
+  const stageDirection = directionText(
+    primaryHistory && primaryHistory.summary && primaryHistory.summary.returns.fiveDayPct,
+    { flat: '接近持平', missing: '暂不完整' },
+  );
+  const sharedRefs = [...new Set([indexRef, historyRef])];
+  return {
+    stance: evidence.serverStance,
+    headline: `${evidence.marketLabel}核心指数${sessionDirection}，近阶段价格表现${stageDirection}。`,
+    cardSummary: `核心指数${sessionDirection}，近阶段价格表现${stageDirection}。本次卡片以已完成交易日的指数日线为核心，详细分项仅展示通过证据校验的观察。`,
+    themes: [`核心指数${sessionDirection}`, `阶段表现${stageDirection}`],
+    keyRisk: '单一交易日的指数表现不足以验证趋势延续性。',
+    executiveSummary: `本次复盘以已完成交易日的核心指数和多周期日线为基础。核心指数${sessionDirection}，近阶段价格表现${stageDirection}。这些信息用于描述已经发生的价格行为，但不足以证明趋势会延续，也不用于推导确定的后续方向。详细分项仅保留通过证据与语义校验的观察。`,
+    prominentEvidenceRefs: {
+      headline: sharedRefs,
+      cardSummary: sharedRefs,
+      themes: [[indexRef], [historyRef]],
+      keyRisk: [historyRef],
+      executiveSummary: sharedRefs,
+    },
+  };
+}
+
 function buildCardMetrics(market, evidence) {
   const byName = new Map(evidence.components.map((component) => [component.name, component.data]));
   const indices = byName.get('indices') || [];
@@ -1018,6 +1076,7 @@ function createMarketReviewService({
       allowedCitationRefs: new Set(citations.map((citation) => citation.id)),
       associationEvidenceRefs: new Set(associationEvidenceRefs),
       discardInvalidSectionItems: true,
+      prominentFallback: buildDeterministicProminent(evidence),
     });
     const usedCitationIds = new Set(Object.values(parsed.sections)
       .flatMap((items) => items.flatMap((item) => item.citationRefs)));
@@ -1060,7 +1119,9 @@ function createMarketReviewService({
       dataWarnings: [
         ...evidence.dataWarnings,
         ...parsed.validationWarnings.map((warning) => (
-          `模型输出 ${warning.section}[${warning.index}] 未通过证据或因果校验，已安全剔除`
+          warning.code === 'prominent_fallback'
+            ? '模型卡片摘要未通过证据或语义校验，已使用服务端确定性摘要'
+            : `模型输出 ${warning.section}[${warning.index}] 未通过证据或因果校验，已安全剔除`
         )),
       ],
       evidenceMeta: {
