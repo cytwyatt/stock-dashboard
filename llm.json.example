@@ -1,8 +1,10 @@
 {
   "//": "复制此文件到 data/llm.json 并填入你的 API Key（OpenAI 兼容协议）",
   "//baseUrl示例": "DeepSeek: https://api.deepseek.com/v1 | Kimi: https://api.moonshot.cn/v1 | 通义: https://dashscope.aliyuncs.com/compatible-mode/v1 | 智谱: https://open.bigmodel.cn/api/paas/v4",
-  "//model示例": "deepseek-chat | kimi-k2-turbo-preview | qwen-plus | glm-4.6",
+  "//model示例": "deepseek-v4-flash | kimi-k2-turbo-preview | qwen-plus | glm-4.6",
+  "//marketReviewModel": "可选；DeepSeek 留空时自动使用 deepseek-v4-pro，其他服务商留空时沿用 model",
   "baseUrl": "https://api.deepseek.com/v1",
-  "apiKey": "sk-你的key",
-  "model": "deepseek-chat"
+  "apiKey": "your-api-key",
+  "model": "deepseek-v4-flash",
+  "marketReviewModel": "deepseek-v4-pro"
 }

@@ -331,3 +331,126 @@ test('AI 盘后复盘路由只允许 GET，并让旧总结地址兼容读取同�
   assert.equal(aliasPost.status, 405);
   assert.deepEqual(calls, ['hk', 'us']);
 });
+
+test('模型配置 API 分离问答与盘后复盘模型、兼容旧客户端并分别测试连接', async () => {
+  const env = {};
+  let stored = {
+    baseUrl: 'https://api.deepseek.com/v1',
+    apiKey: 'test-private-key',
+    model: 'deepseek-v4-flash',
+    marketReviewModel: 'custom-review-model',
+  };
+  const testedModels = [];
+  const effectiveConfig = () => {
+    const model = env.LLM_MODEL || stored.model;
+    const fallbackMarketReviewModel = model;
+    return {
+      baseUrl: stored.baseUrl,
+      apiKey: stored.apiKey,
+      model,
+      marketReviewModel: env.LLM_MARKET_REVIEW_MODEL
+        || env.LLM_MODEL
+        || stored.marketReviewModel
+        || fallbackMarketReviewModel,
+      fallbackMarketReviewModel,
+    };
+  };
+  const handler = createHttpHandler({
+    port: 3888,
+    auth: createAuth(),
+    staticServer: { resolvePath: () => null },
+    marketService: {},
+    chatService: {},
+    llmConfigStore: {
+      getLLMConfig: effectiveConfig,
+      getStoredLLMConfig: () => ({ ...stored }),
+      normalizeLLMBaseUrl: (value) => new URL(value).toString().replace(/\/+$/, ''),
+      writeLLMConfig: (value) => { stored = { ...value }; },
+    },
+    llmClient: {
+      async testConfig(config) {
+        testedModels.push(config.model);
+        return { ok: true, message: `${config.model} OK` };
+      },
+    },
+    watchlistStore: {},
+    chatStore: {},
+    marketMeta() {},
+    sanitizeCode: (value) => value,
+    marketForCode: () => 'cn',
+    env,
+    logger: { error() {} },
+  });
+
+  const get = mockResponse();
+  await handler(mockRequest({ url: '/api/llm-config' }), get);
+  assert.deepEqual(JSON.parse(get.body), {
+    baseUrl: 'https://api.deepseek.com/v1',
+    model: 'deepseek-v4-flash',
+    marketReviewModel: 'custom-review-model',
+    effectiveMarketReviewModel: 'custom-review-model',
+    fallbackMarketReviewModel: 'deepseek-v4-flash',
+    suggestedMarketReviewModel: '',
+    marketReviewModelManaged: false,
+    configured: true,
+    keyMask: 'test****-key',
+  });
+  assert.doesNotMatch(get.body, /test-private-key/);
+
+  const legacyPost = mockResponse();
+  await handler(mockRequest({
+    url: '/api/llm-config',
+    method: 'POST',
+    body: JSON.stringify({
+      baseUrl: stored.baseUrl, model: stored.model, apiKey: '',
+    }),
+  }), legacyPost);
+  assert.equal(legacyPost.status, 200);
+  assert.equal(stored.marketReviewModel, 'custom-review-model');
+
+  const clearOverride = mockResponse();
+  await handler(mockRequest({
+    url: '/api/llm-config',
+    method: 'POST',
+    body: JSON.stringify({
+      baseUrl: stored.baseUrl, model: stored.model, marketReviewModel: '', apiKey: '',
+    }),
+  }), clearOverride);
+  assert.equal(clearOverride.status, 200);
+  assert.equal(stored.marketReviewModel, '');
+  assert.equal(JSON.parse(clearOverride.body).effectiveMarketReviewModel, 'deepseek-v4-flash');
+
+  const setReviewModel = mockResponse();
+  await handler(mockRequest({
+    url: '/api/llm-config',
+    method: 'POST',
+    body: JSON.stringify({
+      baseUrl: stored.baseUrl,
+      model: stored.model,
+      marketReviewModel: 'deepseek-v4-pro',
+      apiKey: '',
+    }),
+  }), setReviewModel);
+  assert.equal(setReviewModel.status, 200);
+
+  const connectionTest = mockResponse();
+  await handler(mockRequest({ url: '/api/llm-config/test', method: 'POST' }), connectionTest);
+  assert.equal(connectionTest.status, 200);
+  assert.equal(JSON.parse(connectionTest.body).ok, true);
+  assert.deepEqual(testedModels, ['deepseek-v4-flash', 'deepseek-v4-pro']);
+
+  env.LLM_MARKET_REVIEW_MODEL = 'managed-review-model';
+  const managed = mockResponse();
+  await handler(mockRequest({
+    url: '/api/llm-config',
+    method: 'POST',
+    body: JSON.stringify({
+      baseUrl: stored.baseUrl,
+      model: stored.model,
+      marketReviewModel: 'attempted-change',
+      apiKey: '',
+    }),
+  }), managed);
+  assert.equal(managed.status, 400);
+  assert.match(JSON.parse(managed.body).error, /环境变量/);
+});

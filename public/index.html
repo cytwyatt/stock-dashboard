@@ -224,8 +224,11 @@
         <label>模型</label>
         <input id="llmModel" list="llmModelList" placeholder="模型名称" autocomplete="off">
         <datalist id="llmModelList"></datalist>
+        <label>盘后复盘模型（可选）</label>
+        <input id="llmReviewModel" list="llmModelList" placeholder="留空自动选择" autocomplete="off">
+        <div class="llm-field-hint" id="llmReviewModelHint">DeepSeek 推荐使用 V4 Pro；留空时沿用 AI 问答模型。</div>
         <label>API Key</label>
-        <input id="llmKey" type="password" placeholder="sk-…" autocomplete="off">
+        <input id="llmKey" type="password" placeholder="请输入 API Key" autocomplete="off">
         <label>接口地址</label>
         <input id="llmBaseUrl" placeholder="https://…/v1" autocomplete="off">
         <div class="llm-hint" id="llmHint"></div>

@@ -2124,7 +2124,7 @@ async function sendChat() {
 
 /* ---------- 模型设置 ---------- */
 const LLM_PROVIDERS = [
-  { id: 'deepseek', name: 'DeepSeek（深度求索）', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-chat', 'deepseek-reasoner'], keyUrl: 'platform.deepseek.com' },
+  { id: 'deepseek', name: 'DeepSeek（深度求索）', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-v4-flash', 'deepseek-v4-pro'], defaultReviewModel: 'deepseek-v4-pro', keyUrl: 'platform.deepseek.com' },
   { id: 'kimi', name: 'Kimi（月之暗面）', baseUrl: 'https://api.moonshot.cn/v1', models: ['kimi-k2-turbo-preview', 'kimi-k2-thinking'], keyUrl: 'platform.moonshot.cn' },
   { id: 'qwen', name: '通义千问（阿里云百炼）', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', models: ['qwen-plus', 'qwen-max', 'qwen-turbo'], keyUrl: 'bailian.console.aliyun.com' },
   { id: 'glm', name: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', models: ['glm-4.6', 'glm-4.5-air'], keyUrl: 'open.bigmodel.cn' },
@@ -2139,9 +2139,19 @@ function llmProviderById(id) {
 function fillLLMProvider(id, keepModel) {
   const p = llmProviderById(id);
   $('#llmProvider').value = p.id;
-  if (p.baseUrl) $('#llmBaseUrl').value = p.baseUrl;
+  if (p.baseUrl || !keepModel) $('#llmBaseUrl').value = p.baseUrl;
   $('#llmModelList').innerHTML = p.models.map((m) => `<option value="${m}">`).join('');
-  if (!keepModel) $('#llmModel').value = p.models[0] || '';
+  if (!keepModel) {
+    $('#llmModel').value = p.models[0] || '';
+    if (!$('#llmReviewModel').disabled) {
+      $('#llmReviewModel').value = p.defaultReviewModel || '';
+    }
+  }
+  const fallbackReviewModel = p.models[0] || 'AI 问答模型';
+  $('#llmReviewModel').placeholder = `留空使用 ${fallbackReviewModel}`;
+  $('#llmReviewModelHint').textContent = p.defaultReviewModel
+    ? `推荐使用 ${p.defaultReviewModel}；清空后沿用 AI 问答模型。`
+    : '留空时沿用 AI 问答模型；已生成的当日复盘不会因换模型而重复生成。';
   $('#llmHint').textContent = p.keyUrl
     ? `API Key 在 ${p.keyUrl} 注册获取。Key 只保存在你自己的服务器上。`
     : '填写任意 OpenAI 兼容服务的接口地址（以 /v1 结尾）。';
@@ -2163,10 +2173,24 @@ async function openLLMConfig() {
     fillLLMProvider(match ? match.id : 'custom', true);
     $('#llmBaseUrl').value = cfg.baseUrl;
     $('#llmModel').value = cfg.model;
-    $('#llmKey').placeholder = cfg.configured ? `已保存 ${cfg.keyMask}（留空表示不修改）` : 'sk-…';
+    const reviewModelValue = cfg.marketReviewModel || cfg.suggestedMarketReviewModel || '';
+    const fallbackReviewModel = cfg.fallbackMarketReviewModel || cfg.model;
+    $('#llmReviewModel').value = reviewModelValue;
+    $('#llmReviewModel').disabled = cfg.marketReviewModelManaged === true;
+    $('#llmReviewModel').placeholder = `留空使用 ${fallbackReviewModel}`;
+    $('#llmReviewModelHint').textContent = cfg.marketReviewModelManaged
+      ? `盘后复盘模型由环境变量管理，当前使用 ${cfg.effectiveMarketReviewModel || cfg.model}。`
+      : reviewModelValue
+        ? `下一份复盘单独使用 ${reviewModelValue}；清空后使用 ${fallbackReviewModel}。`
+        : `留空时使用 ${fallbackReviewModel}；只影响下一份尚未生成的复盘。`;
+    $('#llmKey').placeholder = cfg.configured ? `已保存 ${cfg.keyMask}（留空表示不修改）` : '请输入 API Key';
     if (!cfg.configured) setLLMStatus('尚未配置 API Key', false);
+    else if (match?.id === 'deepseek' && ['deepseek-chat', 'deepseek-reasoner'].includes(cfg.model)) {
+      setLLMStatus('当前使用即将停用的 DeepSeek 旧模型名称，请改为 V4 Flash 或 V4 Pro。', false);
+    }
   } catch (e) {
     fillLLMProvider('deepseek');
+    $('#llmReviewModel').disabled = false;
   }
   $('#llmModal').style.display = 'flex';
 }
@@ -2177,6 +2201,9 @@ async function saveLLMConfig() {
     model: $('#llmModel').value.trim(),
     apiKey: $('#llmKey').value.trim(),
   };
+  if (!$('#llmReviewModel').disabled) {
+    body.marketReviewModel = $('#llmReviewModel').value.trim();
+  }
   const res = await fetch('/api/llm-config', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2187,7 +2214,10 @@ async function saveLLMConfig() {
   $('#llmKey').value = '';
   $('#llmKey').placeholder = j.configured
     ? `已保存 ${j.keyMask}（留空表示不修改）`
-    : 'sk-…';
+    : '请输入 API Key';
+  if (j.fallbackMarketReviewModel) {
+    $('#llmReviewModel').placeholder = `留空使用 ${j.fallbackMarketReviewModel}`;
+  }
   return j;
 }
 
@@ -2298,7 +2328,9 @@ $('#llmProvider').addEventListener('change', (e) => fillLLMProvider(e.target.val
 $('#llmSave').addEventListener('click', async () => {
   try {
     const j = await saveLLMConfig();
-    setLLMStatus(j.configured ? '✓ 已保存，立即生效' : '已保存，但还没有 API Key', j.configured);
+    setLLMStatus(j.configured
+      ? '✓ 已保存；AI 问答立即生效，复盘模型用于下一份复盘'
+      : '已保存，但还没有 API Key', j.configured);
     if (j.configured && ['cn', 'hk', 'us'].includes(state.market)) {
       loadMarketReview();
     }

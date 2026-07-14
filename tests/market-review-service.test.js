@@ -78,7 +78,9 @@ function createHarness({
   timestamp = Date.parse('2026-07-14T07:20:00Z'),
   store = createMemoryStore(),
   apiKey = 'test-key',
+  llmConfig = null,
   completionText = completion(),
+  completionMeta = null,
   klineStale = false,
   indicesRows = null,
   klineByCode = {},
@@ -149,12 +151,22 @@ function createHarness({
   const service = createMarketReviewService({
     marketService,
     marketReviewStore: store,
-    llmConfigStore: { getLLMConfig: () => ({ apiKey, model: 'test-model', baseUrl: 'https://example.test' }) },
+    llmConfigStore: {
+      getLLMConfig: () => ({
+        apiKey,
+        model: 'test-model',
+        baseUrl: 'https://example.test',
+        ...(llmConfig || {}),
+      }),
+    },
     llmClient: {
       async complete(config, messages, tools, options) {
         calls.llm++;
         llmRequests.push({ config, messages, tools, options });
-        return { content: completionText };
+        return {
+          content: completionText,
+          ...(completionMeta ? { _completionMeta: completionMeta } : {}),
+        };
       },
     },
     marketMeta,
@@ -484,7 +496,12 @@ test('延迟生成时忽略供应商盘后刷新时点，并以最后两根完�
     assert.equal(review.data.status, 'ready');
     assert.equal(review.data.reviewDate, '2026-07-14');
     assert.equal(calls.llm, 1);
-    assert.equal(llmRequests[0].options.maxTokens, 8000);
+    assert.deepEqual(llmRequests[0].options, {
+      maxTokens: 16000,
+      timeoutMs: 300000,
+      includeMeta: true,
+      temperature: 0.15,
+    });
     assert.match(llmRequests[0].messages[1].content, /本次合法 evidenceRefs 仅限/);
     assert.match(llmRequests[0].messages[1].content, /绝不能截断 JSON/);
     assert.deepEqual(review.data.card.metrics[0], {
@@ -494,6 +511,86 @@ test('延迟生成时忽略供应商盘后刷新时点，并以最后两根完�
       tone: 'positive',
     });
   }
+});
+
+test('官方 DeepSeek V4 复盘独立使用 Pro、高强度思考与 JSON 模式并记录生成指标', async () => {
+  const { service, calls, llmRequests } = createHarness({
+    llmConfig: {
+      baseUrl: 'https://api.deepseek.com/v1',
+      model: 'deepseek-v4-flash',
+      marketReviewModel: 'deepseek-v4-pro',
+    },
+    completionMeta: {
+      finishReason: 'stop',
+      model: 'deepseek-v4-pro',
+      durationMs: 12345,
+      usage: {
+        promptTokens: 8000,
+        completionTokens: 5000,
+        reasoningTokens: 3000,
+        totalTokens: 13000,
+      },
+    },
+  });
+
+  const review = await service.ensureReview('cn');
+
+  assert.equal(calls.llm, 1);
+  assert.equal(llmRequests[0].config.model, 'deepseek-v4-pro');
+  assert.deepEqual(llmRequests[0].options, {
+    maxTokens: 32768,
+    timeoutMs: 300000,
+    includeMeta: true,
+    omitTemperature: true,
+    thinking: 'enabled',
+    reasoningEffort: 'high',
+    jsonMode: true,
+  });
+  assert.equal(review.data.model, 'deepseek-v4-pro');
+  assert.deepEqual(review.data.generationMeta, {
+    finishReason: 'stop',
+    durationMs: 12345,
+    usage: {
+      promptTokens: 8000,
+      completionTokens: 5000,
+      reasoningTokens: 3000,
+      totalTokens: 13000,
+    },
+    maxOutputTokens: 32768,
+    thinking: 'enabled',
+    jsonMode: true,
+    droppedItemCount: 0,
+    prominentFallbackUsed: false,
+  });
+});
+
+test('复盘输出因 token 上限截断时不落盘并进入退避状态', async () => {
+  const store = createMemoryStore();
+  const { service, calls } = createHarness({
+    store,
+    completionMeta: { finishReason: 'length', durationMs: 100, usage: null },
+  });
+
+  const result = await service.ensureReview('cn');
+
+  assert.equal(calls.llm, 1);
+  assert.equal(result.data.status, 'retry_pending');
+  assert.equal(store.latest('cn'), null);
+  assert.match(store.getAttempt('cn', '2026-07-14').error, /16000 token/);
+});
+
+test('复盘输出被内容过滤等非正常原因终止时不保存部分结果', async () => {
+  const store = createMemoryStore();
+  const { service } = createHarness({
+    store,
+    completionMeta: { finishReason: 'content_filter', durationMs: 100, usage: null },
+  });
+
+  const result = await service.ensureReview('cn');
+
+  assert.equal(result.data.status, 'retry_pending');
+  assert.equal(store.latest('cn'), null);
+  assert.match(store.getAttempt('cn', '2026-07-14').error, /content_filter/);
 });
 
 test('生成复盘时安全剔除单条不合规明细，不重试模型且记录数据提示', async () => {

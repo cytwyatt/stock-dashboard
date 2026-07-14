@@ -140,9 +140,21 @@ function createHttpHandler({
       if (pathname === '/api/llm-config') {
         if (req.method === 'GET') {
           const config = llmConfigStore.getLLMConfig();
+          const stored = llmConfigStore.getStoredLLMConfig();
+          const storedModel = typeof stored.model === 'string' ? stored.model.trim() : '';
+          const storedMarketReviewModel = typeof stored.marketReviewModel === 'string'
+            ? stored.marketReviewModel.trim().slice(0, 100)
+            : '';
           return sendJSON(res, 200, {
             baseUrl: config.baseUrl,
             model: config.model,
+            marketReviewModel: storedMarketReviewModel,
+            effectiveMarketReviewModel: config.marketReviewModel,
+            fallbackMarketReviewModel: config.fallbackMarketReviewModel || config.model,
+            suggestedMarketReviewModel: !storedModel && !storedMarketReviewModel
+              ? config.marketReviewModel
+              : '',
+            marketReviewModelManaged: !!(env.LLM_MARKET_REVIEW_MODEL || env.LLM_MODEL),
             configured: !!config.apiKey,
             keyMask: maskKey(config.apiKey),
           });
@@ -158,6 +170,13 @@ function createHttpHandler({
           const stored = llmConfigStore.getStoredLLMConfig();
           const rawBaseUrl = String(body.baseUrl || '').trim().slice(0, 200);
           const model = String(body.model || '').trim().slice(0, 100);
+          const hasMarketReviewModel = Object.prototype.hasOwnProperty.call(body, 'marketReviewModel');
+          const storedMarketReviewModel = typeof stored.marketReviewModel === 'string'
+            ? stored.marketReviewModel.trim().slice(0, 100)
+            : '';
+          const marketReviewModel = hasMarketReviewModel
+            ? String(body.marketReviewModel || '').trim().slice(0, 100)
+            : storedMarketReviewModel;
           const enteredKey = String(body.apiKey || '').trim().slice(0, 300);
           let baseUrl;
           try { baseUrl = llmConfigStore.normalizeLLMBaseUrl(rawBaseUrl); }
@@ -169,6 +188,10 @@ function createHttpHandler({
           if (env.LLM_MODEL && model !== current.model) {
             return sendJSON(res, 400, { error: '模型名称由环境变量配置，不能在页面中修改' });
           }
+          if ((env.LLM_MARKET_REVIEW_MODEL || env.LLM_MODEL)
+              && hasMarketReviewModel && marketReviewModel !== storedMarketReviewModel) {
+            return sendJSON(res, 400, { error: '盘后复盘模型由环境变量配置，不能在页面中修改' });
+          }
           if (env.LLM_API_KEY && enteredKey) {
             return sendJSON(res, 400, { error: 'API Key 由环境变量配置，不能在页面中修改' });
           }
@@ -179,18 +202,35 @@ function createHttpHandler({
           const apiKey = env.LLM_API_KEY
             ? previousFileKey
             : enteredKey || (baseUrl === current.baseUrl ? current.apiKey : '');
-          llmConfigStore.writeLLMConfig({ baseUrl, apiKey, model });
+          llmConfigStore.writeLLMConfig({ baseUrl, apiKey, model, marketReviewModel });
           const effective = llmConfigStore.getLLMConfig();
           return sendJSON(res, 200, {
             ok: true,
             configured: !!effective.apiKey,
             keyMask: maskKey(effective.apiKey),
+            model: effective.model,
+            effectiveMarketReviewModel: effective.marketReviewModel,
+            fallbackMarketReviewModel: effective.fallbackMarketReviewModel || effective.model,
           });
         }
         return sendJSON(res, 405, { error: 'method not allowed' });
       }
       if (pathname === '/api/llm-config/test' && req.method === 'POST') {
-        return sendJSON(res, 200, await llmClient.testConfig(llmConfigStore.getLLMConfig()));
+        const config = llmConfigStore.getLLMConfig();
+        const chatResult = await llmClient.testConfig(config);
+        if (!chatResult.ok || config.marketReviewModel === config.model) {
+          return sendJSON(res, 200, chatResult);
+        }
+        const reviewResult = await llmClient.testConfig({
+          ...config,
+          model: config.marketReviewModel,
+        });
+        return sendJSON(res, 200, {
+          ok: reviewResult.ok,
+          message: reviewResult.ok
+            ? `AI 问答：${chatResult.message}；盘后复盘：${reviewResult.message}`
+            : `AI 问答连接成功；盘后复盘模型测试失败：${reviewResult.message}`,
+        });
       }
 
       if (pathname === '/api/chat' && req.method === 'POST') {

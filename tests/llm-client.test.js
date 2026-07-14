@@ -85,6 +85,139 @@ test('complete 在 tools 非空时发送 tools 与自动工具选择并返回首
   });
 });
 
+test('官方 DeepSeek V4 普通问答默认关闭 thinking，保持工具调用兼容', async () => {
+  let body;
+  const client = createLLMClient({
+    fetchImpl: async (url, init) => {
+      body = JSON.parse(init.body);
+      return jsonResponse();
+    },
+  });
+  const tools = [{ type: 'function', function: { name: 'get_quote' } }];
+
+  await client.complete({
+    ...cfg,
+    baseUrl: 'https://api.deepseek.com/v1',
+    model: 'deepseek-v4-flash',
+  }, messages, tools);
+
+  assert.deepEqual(body, {
+    model: 'deepseek-v4-flash',
+    messages,
+    temperature: 0.3,
+    thinking: { type: 'disabled' },
+    tools,
+    tool_choice: 'auto',
+  });
+});
+
+test('DeepSeek V4 连接测试关闭 thinking，并拒绝空内容或非正常结束', async () => {
+  const requests = [];
+  const responses = [
+    {
+      ok: true,
+      async json() {
+        return {
+          choices: [{ finish_reason: 'stop', message: { content: 'OK' } }],
+        };
+      },
+    },
+    {
+      ok: true,
+      async json() {
+        return {
+          choices: [{ finish_reason: 'length', message: { content: '' } }],
+        };
+      },
+    },
+  ];
+  const client = createLLMClient({
+    fetchImpl: async (url, init) => {
+      requests.push(JSON.parse(init.body));
+      return responses.shift();
+    },
+  });
+  const deepSeekConfig = {
+    ...cfg,
+    baseUrl: 'https://api.deepseek.com/v1',
+    model: 'deepseek-v4-pro',
+  };
+
+  const success = await client.testConfig(deepSeekConfig);
+  const truncated = await client.testConfig(deepSeekConfig);
+
+  assert.equal(success.ok, true);
+  assert.match(success.message, /deepseek-v4-pro.*OK/);
+  assert.deepEqual(requests[0].thinking, { type: 'disabled' });
+  assert.equal(truncated.ok, false);
+  assert.match(truncated.message, /length/);
+});
+
+test('complete 映射深度复盘参数、省略 temperature 并返回受控完成元数据', async () => {
+  let request;
+  const clock = [1000, 1125];
+  const client = createLLMClient({
+    now: () => clock.shift(),
+    fetchImpl: async (url, init) => {
+      request = { url, init, body: JSON.parse(init.body) };
+      return {
+        ok: true,
+        async json() {
+          return {
+            model: 'deepseek-v4-pro',
+            choices: [{
+              finish_reason: 'stop',
+              message: { role: 'assistant', content: '{"ok":true}' },
+            }],
+            usage: {
+              prompt_tokens: 100,
+              completion_tokens: 250,
+              total_tokens: 350,
+              completion_tokens_details: { reasoning_tokens: 200 },
+              ignored: 'value',
+            },
+          };
+        },
+      };
+    },
+  });
+
+  const result = await client.complete(cfg, messages, null, {
+    maxTokens: 32768,
+    timeoutMs: 300000,
+    omitTemperature: true,
+    thinking: 'enabled',
+    reasoningEffort: 'high',
+    jsonMode: true,
+    includeMeta: true,
+  });
+
+  assert.deepEqual(request.body, {
+    model: 'test-model',
+    messages,
+    max_tokens: 32768,
+    thinking: { type: 'enabled' },
+    reasoning_effort: 'high',
+    response_format: { type: 'json_object' },
+  });
+  assert.ok(request.init.signal instanceof AbortSignal);
+  assert.deepEqual(result, {
+    role: 'assistant',
+    content: '{"ok":true}',
+    _completionMeta: {
+      finishReason: 'stop',
+      model: 'deepseek-v4-pro',
+      usage: {
+        promptTokens: 100,
+        completionTokens: 250,
+        reasoningTokens: 200,
+        totalTokens: 350,
+      },
+      durationMs: 125,
+    },
+  });
+});
+
 test('complete 将非成功响应和缺少 choices 的响应转为明确错误', async (t) => {
   await t.test('HTTP 错误包含状态码和截断后的响应体', async () => {
     const responseBody = 'x'.repeat(320);

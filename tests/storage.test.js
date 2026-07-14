@@ -131,6 +131,7 @@ test('LLM 配置保持文件值、环境变量优先级、默认值与非法 URL
     baseUrl: 'https://file.example/v1/',
     apiKey: 'file-key',
     model: 'file-model',
+    marketReviewModel: 'file-review-model',
     extra: 'preserved',
   };
   store.writeLLMConfig(saved);
@@ -139,17 +140,24 @@ test('LLM 配置保持文件值、环境变量优先级、默认值与非法 URL
     baseUrl: 'https://file.example/v1',
     apiKey: 'file-key',
     model: 'file-model',
+    marketReviewModel: 'file-review-model',
+    fallbackMarketReviewModel: 'file-model',
   });
   assert.equal(fs.statSync(store.file).mode & 0o777, 0o600);
 
   env.LLM_BASE_URL = 'https://env.example/api/';
   env.LLM_API_KEY = 'env-key';
   env.LLM_MODEL = 'env-model';
+  env.LLM_MARKET_REVIEW_MODEL = 'env-review-model';
   assert.deepEqual(store.getLLMConfig(), {
     baseUrl: 'https://env.example/api',
     apiKey: 'env-key',
     model: 'env-model',
+    marketReviewModel: 'env-review-model',
+    fallbackMarketReviewModel: 'env-model',
   });
+  delete env.LLM_MARKET_REVIEW_MODEL;
+  assert.equal(store.getLLMConfig().marketReviewModel, 'env-model');
 
   env.LLM_BASE_URL = ' not a url/// ';
   assert.equal(store.getLLMConfig().baseUrl, 'not a url');
@@ -157,12 +165,48 @@ test('LLM 配置保持文件值、环境变量优先级、默认值与非法 URL
   delete env.LLM_BASE_URL;
   delete env.LLM_API_KEY;
   delete env.LLM_MODEL;
+  delete env.LLM_MARKET_REVIEW_MODEL;
   assert.deepEqual(store.getStoredLLMConfig(), {});
   assert.deepEqual(store.getLLMConfig(), {
     baseUrl: 'https://api.deepseek.com/v1',
     apiKey: '',
-    model: 'deepseek-chat',
+    model: 'deepseek-v4-flash',
+    marketReviewModel: 'deepseek-v4-pro',
+    fallbackMarketReviewModel: 'deepseek-v4-flash',
   });
+  for (const invalidShape of ['null', '[]', '"text"']) {
+    fs.writeFileSync(store.file, invalidShape);
+    assert.deepEqual(store.getStoredLLMConfig(), {});
+  }
+});
+
+test('新 DeepSeek 配置推荐 V4 Pro，已有配置缺少复盘字段时保持沿用问答模型', (t) => {
+  const dataDir = tempDir(t);
+  const store = createLLMConfigStore({ dataDir, fs, jsonFile: jsonFile(dataDir), env: {} });
+
+  assert.equal(store.getLLMConfig().marketReviewModel, 'deepseek-v4-pro');
+
+  store.writeLLMConfig({
+    baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-v4-flash',
+  });
+  assert.equal(store.getLLMConfig().marketReviewModel, 'deepseek-v4-flash');
+
+  store.writeLLMConfig({
+    baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-v4-flash',
+    marketReviewModel: 'deepseek-v4-pro',
+  });
+  assert.equal(store.getLLMConfig().marketReviewModel, 'deepseek-v4-pro');
+
+  store.writeLLMConfig({
+    baseUrl: 'https://llm.example/v1', apiKey: '', model: 'custom-model',
+  });
+  assert.equal(store.getLLMConfig().marketReviewModel, 'custom-model');
+
+  store.writeLLMConfig({
+    baseUrl: 'https://llm.example/v1', apiKey: '', model: 'custom-model',
+    marketReviewModel: 'custom-review-model',
+  });
+  assert.equal(store.getLLMConfig().marketReviewModel, 'custom-review-model');
 });
 
 test('LLM base URL 只接受无认证信息、query 与 hash 的 http(s) 地址', () => {
