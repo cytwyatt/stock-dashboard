@@ -228,6 +228,30 @@ function compactIndices(rows) {
   }));
 }
 
+function completedIndexSnapshot(index, history) {
+  const bar = history && history.summary && history.summary.latestBar;
+  if (!index || !bar || !/^\d{4}-\d{2}-\d{2}$/.test(String(bar.date || ''))
+      || !Number.isFinite(bar.close) || bar.close <= 0) return null;
+  return {
+    code: index.code,
+    name: index.name,
+    currency: index.currency,
+    assetType: index.assetType,
+    unit: index.unit,
+    asOf: bar.date,
+    price: bar.close,
+    close: bar.close,
+    prevClose: finiteOrNull(bar.previousClose),
+    change: finiteOrNull(bar.change),
+    changePct: finiteOrNull(bar.changePct),
+    open: finiteOrNull(bar.open),
+    high: finiteOrNull(bar.high),
+    low: finiteOrNull(bar.low),
+    volume: finiteOrNull(bar.volume),
+    snapshotBasis: 'completed_daily_bar',
+  };
+}
+
 function compactRank(rows) {
   return (Array.isArray(rows) ? rows : []).slice(0, 8).map((row) => ({
     code: shortText(row && row.code, 24),
@@ -766,11 +790,9 @@ function createMarketReviewService({
     const indicesEntry = await marketService.indices(market);
     const indices = compactIndices(indicesEntry.data);
     if (!indices.length) throw new Error('主要指数数据不可用');
-    const indicesMeta = marketMeta(indicesEntry, { market });
-    if (indicesMeta.stale) throw new Error('核心指数正在使用旧缓存');
     const primaryCode = PRIMARY_INDEX[market];
-    const primaryQuote = indices.find((item) => item.code === primaryCode);
-    if (!primaryQuote) throw new Error(`核心指数 ${primaryCode} 报价不可用`);
+    const primaryIndex = indices.find((item) => item.code === primaryCode);
+    if (!primaryIndex) throw new Error(`核心指数 ${primaryCode} 报价不可用`);
 
     const historyResults = await Promise.allSettled(indices.map(async (index) => {
       const entry = await marketService.kline(index.code, 60, 'day');
@@ -785,18 +807,11 @@ function createMarketReviewService({
     if (!primaryHistory) throw new Error('核心指数日线不可用');
     const reviewDate = primaryHistory.summary.latestDate;
     if (!/^\d{4}-\d{2}-\d{2}$/.test(reviewDate)) throw new Error('核心指数日线交易日无效');
-    const quoteDate = dateForMarket(primaryQuote && primaryQuote.asOf, market);
-    if (!quoteDate || quoteDate !== reviewDate) {
-      throw new Error(`核心指数报价日期 ${quoteDate} 与日线日期 ${reviewDate} 不一致`);
-    }
-    const closeAt = marketCloseTimestamp(market, reviewDate);
-    const primaryQuoteAt = timestampForMarketValue(primaryQuote.asOf, market);
-    if (!Number.isFinite(primaryQuoteAt) || primaryQuoteAt > closeAt
-        || closeAt - primaryQuoteAt > ASSOCIATION_ALIGNMENT_MS) {
-      throw new Error('核心指数报价不是与当日收盘对齐的快照');
-    }
     const primaryHistoryMeta = marketMeta(primaryHistory.entry, { market });
     if (primaryHistoryMeta.stale) throw new Error('核心指数日线正在使用旧缓存');
+    if (!completedIndexSnapshot(primaryIndex, primaryHistory)) {
+      throw new Error('核心指数完整日线快照不可用');
+    }
 
     const historyByCode = new Map(histories.map((item) => [item.code, item]));
     const validCodes = new Set([primaryCode]);
@@ -808,16 +823,11 @@ function createMarketReviewService({
         reason = '日线不可用';
       } else {
         const historyMeta = marketMeta(history.entry, { market });
-        const secondaryQuoteDate = dateForMarket(index.asOf, market);
         if (historyMeta.stale) reason = '日线使用旧缓存';
-        else if (!secondaryQuoteDate || secondaryQuoteDate !== reviewDate) {
-          reason = `报价日期 ${secondaryQuoteDate || '未知'} 与复盘日不一致`;
-        } else if (!Number.isFinite(timestampForMarketValue(index.asOf, market))
-            || timestampForMarketValue(index.asOf, market) > closeAt
-            || closeAt - timestampForMarketValue(index.asOf, market) > ASSOCIATION_ALIGNMENT_MS) {
-          reason = '报价时点未与当日收盘对齐';
-        } else if (history.summary.latestDate !== reviewDate) {
+        else if (history.summary.latestDate !== reviewDate) {
           reason = `日线日期 ${history.summary.latestDate || '未知'} 与复盘日不一致`;
+        } else if (!completedIndexSnapshot(index, history)) {
+          reason = '完整日线快照不可用';
         }
       }
       if (reason) {
@@ -827,12 +837,15 @@ function createMarketReviewService({
         validCodes.add(index.code);
       }
     }
-    const validIndices = indices.filter((item) => validCodes.has(item.code));
+    const validIndices = indices
+      .filter((item) => validCodes.has(item.code))
+      .map((item) => completedIndexSnapshot(item, historyByCode.get(item.code)))
+      .filter(Boolean);
     const validHistories = histories.filter((item) => validCodes.has(item.code));
     components.push({
       name: 'indices',
       data: validIndices,
-      meta: { ...indicesMeta, asOf: primaryQuote.asOf, asOfBasis: 'provider' },
+      meta: { ...primaryHistoryMeta, asOf: reviewDate, asOfBasis: 'completed_session' },
     });
     components.push({
       name: 'indexHistory',

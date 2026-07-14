@@ -34,6 +34,11 @@ function summarizeIndexHistory(rows) {
   if (!clean.length) return null;
 
   const latest = clean.at(-1);
+  const previous = clean.length > 1 ? clean.at(-2) : null;
+  const change = previous && previous.close > 0
+    ? round(latest.close - previous.close, 4)
+    : null;
+  const changePct = periodReturn(clean, 1);
   const window20 = clean.slice(-20);
   const highs = window20.map((row) => row.high).filter((value) => value != null);
   const lows = window20.map((row) => row.low).filter((value) => value != null);
@@ -49,8 +54,19 @@ function summarizeIndexHistory(rows) {
   return {
     latestDate: latest.date,
     close: latest.close,
+    latestBar: {
+      date: latest.date,
+      open: latest.open,
+      high: latest.high,
+      low: latest.low,
+      close: latest.close,
+      volume: latest.volume,
+      previousClose: previous ? previous.close : null,
+      change,
+      changePct,
+    },
     returns: {
-      oneDayPct: periodReturn(clean, 1),
+      oneDayPct: changePct,
       fiveDayPct: periodReturn(clean, 5),
       twentyDayPct: periodReturn(clean, 20),
     },

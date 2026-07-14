@@ -350,6 +350,78 @@ test('成交额降级时无 currentDate 的当日 overview 可归一为已完成
   assert.equal(weekend.excluded, true);
 });
 
+test('延迟生成时忽略供应商盘后刷新时点，并以最后两根完整日K构造指数收盘快照', async () => {
+  const history = [
+    {
+      date: '2026-07-13', open: 99, high: 101, low: 98, close: 100, volume: 900,
+    },
+    {
+      date: '2026-07-14', open: 101, high: 103, low: 100, close: 102, volume: 1200,
+    },
+  ];
+  const cases = [
+    {
+      market: 'cn', code: 'sh000001', name: '上证指数',
+      quoteAsOf: '2026-07-14T16:14:00+08:00', collectedAt: '2026-07-14T10:20:00Z',
+    },
+    {
+      market: 'hk', code: 'hkHSI', name: '恒生指数',
+      quoteAsOf: '2026-07-14T18:30:00+08:00', collectedAt: '2026-07-14T10:40:00Z',
+    },
+  ];
+
+  for (const scenario of cases) {
+    const { service, calls } = createHarness({
+      timestamp: Date.parse(scenario.collectedAt),
+      indicesRows: [{
+        code: scenario.code,
+        name: scenario.name,
+        price: 9999,
+        changePct: -9,
+        open: 8888,
+        high: 10000,
+        low: 8000,
+        asOf: scenario.quoteAsOf,
+      }],
+      klineByCode: { [scenario.code]: { history } },
+    });
+    const evidence = await service.collectEvidence(scenario.market, new Date(scenario.collectedAt));
+    const indices = evidence.components.find((component) => component.name === 'indices');
+    assert.deepEqual(indices.data, [{
+      code: scenario.code,
+      name: scenario.name,
+      currency: null,
+      assetType: 'equity_index',
+      unit: 'index_points',
+      asOf: '2026-07-14',
+      price: 102,
+      close: 102,
+      prevClose: 100,
+      change: 2,
+      changePct: 2,
+      open: 101,
+      high: 103,
+      low: 100,
+      volume: 1200,
+      snapshotBasis: 'completed_daily_bar',
+    }]);
+    assert.equal(indices.meta.asOf, '2026-07-14');
+    assert.equal(indices.meta.asOfBasis, 'completed_session');
+    assert.ok(evidence.associationEvidenceRefs.includes('indices'));
+
+    const review = await service.ensureReview(scenario.market);
+    assert.equal(review.data.status, 'ready');
+    assert.equal(review.data.reviewDate, '2026-07-14');
+    assert.equal(calls.llm, 1);
+    assert.deepEqual(review.data.card.metrics[0], {
+      label: scenario.name,
+      value: '+2.00%',
+      detail: '收盘 102',
+      tone: 'positive',
+    });
+  }
+});
+
 test('三个市场收盘缓冲按当地时区判断，并自动覆盖美股夏冬令时', () => {
   assert.equal(isCompletedReviewDate('cn', '2026-07-14', new Date('2026-07-14T07:09:00Z')), false);
   assert.equal(isCompletedReviewDate('cn', '2026-07-14', new Date('2026-07-14T07:10:00Z')), true);

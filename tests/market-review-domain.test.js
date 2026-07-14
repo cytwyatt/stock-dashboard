@@ -16,6 +16,17 @@ test('盘后指数历史计算多周期收益、20日位置与不含当日的量
   }));
   const result = summarizeIndexHistory(rows);
   assert.equal(result.latestDate, '2026-06-22');
+  assert.deepEqual(result.latestBar, {
+    date: '2026-06-22',
+    open: 120,
+    high: 122,
+    low: 119,
+    close: 121,
+    volume: 300,
+    previousClose: 120,
+    change: 1,
+    changePct: 0.83,
+  });
   assert.equal(result.returns.oneDayPct, 0.83);
   assert.equal(result.returns.fiveDayPct, 4.31);
   assert.equal(result.returns.twentyDayPct, 19.8);
@@ -34,6 +45,9 @@ test('盘后指数历史不足或无效时返回 null 指标而不是补零', ()
     { date: '2026-07-14', close: 10, high: 10, low: 10, volume: null },
   ]);
   assert.equal(result.returns.oneDayPct, null);
+  assert.equal(result.latestBar.previousClose, null);
+  assert.equal(result.latestBar.change, null);
+  assert.equal(result.latestBar.changePct, null);
   assert.equal(result.returns.fiveDayPct, null);
   assert.equal(result.range20.positionPct, null);
   assert.equal(result.volume.ratioToAverage20, null);
