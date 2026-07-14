@@ -47,6 +47,7 @@ function harness(options = {}) {
     stockContextSystemMessage: (context) => `CONTEXT:${context.code}`,
     stockResearchSystemMessage: (research) => `RESEARCH:${research.id}`,
     stockEvidenceSystemMessage: (evidence, serialize) => `EVIDENCE:${serialize(evidence, 10500)}`,
+    adaptiveThinkingSystemMessage: (evidence) => `ADAPTIVE:${evidence}`,
   };
   let tick = 1000;
   const service = createChatService({
@@ -57,6 +58,7 @@ function harness(options = {}) {
     LLM_TOOLS: [{ type: 'function', function: { name: 'fixture' } }],
     automaticEvidence: options.automaticEvidence || (async () => null),
     automaticResearch: options.automaticResearch || (async () => null),
+    adaptiveThinkingIntent: options.adaptiveThinkingIntent || (() => false),
     prompts,
     serializeToolResult: (value, limit) => JSON.stringify({ value, limit }),
     logger: { error: (...args) => logs.push(args) },
@@ -203,6 +205,154 @@ test('工具调用逐个执行，参数损坏回空对象，工具异常作为�
   assert.match(secondMessages.at(-2).content, /upstream failed/);
   assert.equal(secondMessages.at(-1).tool_call_id, 'two');
   assert.equal(events.at(-1).content, '工具完成');
+});
+
+test('官方 DeepSeek V4 对复杂个股研究先非思考取数，再以无工具思考生成最终答案', async () => {
+  const h = harness({
+    config: {
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'key',
+      model: 'deepseek-v4-flash',
+    },
+    adaptiveThinkingIntent: () => true,
+    automaticResearch: async () => ({ id: 'r1' }),
+    responses: [
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'quote-1', function: { name: 'get_quote', arguments: '{"code":"AAPL"}' } }],
+      },
+      { role: 'assistant', content: '普通草稿' },
+      {
+        role: 'assistant',
+        content: '深度终稿',
+        reasoning_content: '不得持久化的思考内容',
+        _completionMeta: { finishReason: 'stop' },
+      },
+    ],
+  });
+  const events = [];
+  await h.service.run(h.service.prepare({
+    sessionId: 'adaptive',
+    message: '综合分析这只股票的表现和风险',
+    stockContext: { code: 'AAPL', name: 'Apple', market: 'us' },
+  }), (event) => events.push(event));
+
+  assert.equal(h.llmCalls.length, 3);
+  assert.deepEqual(h.llmCalls[0][3], { thinking: 'disabled' });
+  assert.deepEqual(h.llmCalls[1][3], { thinking: 'disabled' });
+  assert.equal(h.llmCalls[0][2][0].function.name, 'fixture');
+  assert.equal(h.llmCalls[1][2][0].function.name, 'fixture');
+
+  const [, adaptiveMessages, adaptiveTools, adaptiveOptions] = h.llmCalls[2];
+  assert.equal(adaptiveTools, null);
+  assert.deepEqual(adaptiveOptions, {
+    thinking: 'enabled',
+    reasoningEffort: 'high',
+    omitTemperature: true,
+    timeoutMs: 300000,
+    includeMeta: true,
+  });
+  assert.ok(!adaptiveMessages.some((message) => message.role === 'tool' || message.tool_calls));
+  const adaptivePrompt = adaptiveMessages.find((message) => message.content.startsWith('ADAPTIVE:'));
+  assert.ok(adaptivePrompt);
+  assert.match(adaptivePrompt.content, /get_quote/);
+  assert.match(adaptivePrompt.content, /AAPL/);
+  assert.equal(events.at(-1).content, '深度终稿');
+  assert.deepEqual(h.getState().sessions[0].messages.at(-1), {
+    role: 'assistant',
+    content: '深度终稿',
+  });
+});
+
+test('简单资讯查询即使使用工具也不触发自适应思考', async () => {
+  const h = harness({
+    config: {
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'key',
+      model: 'deepseek-v4-flash',
+    },
+    automaticEvidence: async () => ({ id: 'e1' }),
+    responses: [
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'news-1', function: { name: 'get_news', arguments: '{}' } }],
+      },
+      { role: 'assistant', content: '资讯答案' },
+    ],
+  });
+  const events = [];
+  await h.service.run(h.service.prepare({
+    sessionId: 'simple',
+    message: '最新公告是什么？',
+    stockContext: { code: 'AAPL', name: 'Apple', market: 'us' },
+  }), (event) => events.push(event));
+
+  assert.equal(h.llmCalls.length, 2);
+  assert.ok(h.llmCalls.every((call) => call[3].thinking === 'disabled'));
+  assert.equal(events.at(-1).content, '资讯答案');
+});
+
+test('非官方兼容端点即使命中复杂意图也保持单阶段问答', async () => {
+  const h = harness({
+    adaptiveThinkingIntent: () => true,
+    automaticResearch: async () => ({ id: 'r1' }),
+    responses: [{ role: 'assistant', content: '兼容端点答案' }],
+  });
+  const events = [];
+  await h.service.run(h.service.prepare({
+    sessionId: 'compatible',
+    message: '综合分析风险',
+    stockContext: { code: 'AAPL', name: 'Apple', market: 'us' },
+  }), (event) => events.push(event));
+
+  assert.equal(h.llmCalls.length, 1);
+  assert.deepEqual(h.llmCalls[0][3], {});
+  assert.equal(events.at(-1).content, '兼容端点答案');
+});
+
+test('自适应思考失败或异常结束时保留普通答案并记录降级', async (t) => {
+  const cases = [
+    ['请求失败', new Error('thinking timeout')],
+    ['截断', {
+      role: 'assistant', content: '不完整答案', _completionMeta: { finishReason: 'length' },
+    }],
+    ['空内容', {
+      role: 'assistant', content: '   ', _completionMeta: { finishReason: 'stop' },
+    }],
+    ['意外工具调用', {
+      role: 'assistant', content: '异常', tool_calls: [{ id: 'unexpected' }],
+      _completionMeta: { finishReason: 'stop' },
+    }],
+  ];
+
+  for (const [index, [name, deepResponse]] of cases.entries()) {
+    await t.test(name, async () => {
+      const h = harness({
+        config: {
+          baseUrl: 'https://api.deepseek.com/v1',
+          apiKey: 'key',
+          model: 'deepseek-v4-flash',
+        },
+        adaptiveThinkingIntent: () => true,
+        responses: [{ role: 'assistant', content: '可靠草稿' }, deepResponse],
+      });
+      const events = [];
+      await h.service.run(h.service.prepare({
+        sessionId: `fallback-${index}`,
+        message: '综合分析风险',
+        stockContext: { code: 'AAPL', name: 'Apple', market: 'us' },
+      }), (event) => events.push(event));
+
+      assert.equal(h.llmCalls.length, 2);
+      assert.equal(events.at(-1).type, 'answer');
+      assert.equal(events.at(-1).content, '可靠草稿');
+      assert.equal(h.getState().sessions[0].messages.at(-1).content, '可靠草稿');
+      assert.equal(h.logs.length, 1);
+      assert.equal(h.logs[0][0], '[adaptive-thinking]');
+    });
+  }
 });
 
 test('连续6轮工具调用后使用固定超限答案并按原顺序持久化', async () => {

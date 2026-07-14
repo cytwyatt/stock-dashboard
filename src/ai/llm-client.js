@@ -69,10 +69,12 @@ function createLLMClient({ fetchImpl = global.fetch, now = Date.now } = {}) {
 
   async function complete(cfg, messages, tools, options = {}) {
     const hasTools = Array.isArray(tools) && tools.length > 0;
+    const officialDeepSeekV4 = isOfficialDeepSeekV4(cfg);
     const requestedThinking = options.thinking === 'enabled' || options.thinking === 'disabled'
       ? options.thinking
       : '';
-    const thinking = requestedThinking || (isOfficialDeepSeekV4(cfg) ? 'disabled' : '');
+    const thinking = requestedThinking || (officialDeepSeekV4 ? 'disabled' : '');
+    const thinkingEnabled = thinking === 'enabled';
     const reasoningEffort = options.reasoningEffort === 'high' || options.reasoningEffort === 'max'
       ? options.reasoningEffort
       : '';
@@ -82,14 +84,17 @@ function createLLMClient({ fetchImpl = global.fetch, now = Date.now } = {}) {
     const payload = {
       model: cfg.model,
       messages,
-      ...(options.omitTemperature
+      ...(options.omitTemperature || (officialDeepSeekV4 && thinkingEnabled)
         ? {}
         : { temperature: options.temperature == null ? 0.3 : options.temperature }),
       ...(options.maxTokens == null ? {} : { max_tokens: options.maxTokens }),
       ...(thinking ? { thinking: { type: thinking } } : {}),
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(options.jsonMode ? { response_format: { type: 'json_object' } } : {}),
-      ...(hasTools ? { tools, tool_choice: 'auto' } : {}),
+      ...(hasTools ? {
+        tools,
+        ...(officialDeepSeekV4 && thinkingEnabled ? {} : { tool_choice: 'auto' }),
+      } : {}),
     };
     const startedAt = now();
     const res = await fetchImpl(`${cfg.baseUrl}/chat/completions`, {
@@ -107,9 +112,14 @@ function createLLMClient({ fetchImpl = global.fetch, now = Date.now } = {}) {
     if (!choice || !choice.message || typeof choice.message !== 'object') {
       throw new Error('LLM 返回格式异常');
     }
-    if (!options.includeMeta) return choice.message;
+    const message = officialDeepSeekV4 && thinkingEnabled
+      && Array.isArray(choice.message.tool_calls) && choice.message.tool_calls.length
+      && choice.message.content == null
+      ? { ...choice.message, content: '' }
+      : choice.message;
+    if (!options.includeMeta) return message;
     return {
-      ...choice.message,
+      ...message,
       _completionMeta: {
         finishReason: typeof choice.finish_reason === 'string' ? choice.finish_reason : null,
         model: typeof json.model === 'string' ? json.model : cfg.model,
