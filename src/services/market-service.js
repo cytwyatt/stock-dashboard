@@ -43,7 +43,7 @@ function normalizeMarket(market) {
 }
 
 function normalizeOverviewMarket(market) {
-  return market === 'us' ? 'us' : 'cn';
+  return market === 'us' || market === 'hk' ? market : 'cn';
 }
 
 function normalizeDirection(dir) {
@@ -71,6 +71,7 @@ function createMarketService(deps) {
     getRankHK,
     getRankUS,
     getOverviewCN,
+    getOverviewHK,
     getOverviewUS,
     getQuote,
     getQuotes,
@@ -135,7 +136,9 @@ function createMarketService(deps) {
       const normalizedMarket = normalizeOverviewMarket(market);
       const provider = normalizedMarket === 'us'
         ? getOverviewUS
-        : async () => getOverviewCN(await service.sectors());
+        : normalizedMarket === 'hk'
+          ? getOverviewHK
+          : async () => getOverviewCN(await service.sectors());
       return cachedEntry(
         cacheKeys.overview(normalizedMarket),
         CACHE_TTL.overview,

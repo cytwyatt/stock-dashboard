@@ -36,6 +36,7 @@ test('仅导入 storage 模块不会读取 MARKET_DATA_DIR 或创建文件', () 
       '../src/storage/watchlist-store',
       '../src/storage/llm-config-store',
       '../src/storage/chat-store',
+      '../src/storage/market-review-store',
     ]) {
       delete require.cache[require.resolve(modulePath)];
       require(modulePath);

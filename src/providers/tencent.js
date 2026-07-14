@@ -8,6 +8,24 @@ const CN_INDICES = Object.freeze([
   'sh000688',
 ]);
 const HK_INDICES = Object.freeze(['hkHSI', 'hkHSCEI', 'hkHSTECH']);
+const MARKET_TURNOVER_SPECS = Object.freeze({
+  cn: Object.freeze({
+    codes: Object.freeze(['sh000001', 'sz399001']),
+    closeTime: '1500',
+    basis: 'sh_sz_market_total',
+    currency: 'CNY',
+    timezone: 'Asia/Shanghai',
+    coverage: '沪深市场累计成交额（不含北交所）',
+  }),
+  hk: Object.freeze({
+    codes: Object.freeze(['hkHSI']),
+    closeTime: '1600',
+    basis: 'tencent_hsi_market_turnover',
+    currency: 'HKD',
+    timezone: 'Asia/Hong_Kong',
+    coverage: '港股大市累计成交额（腾讯恒生指数口径）',
+  }),
+});
 
 const defaultNum = (value) => {
   const parsed = parseFloat(value);
@@ -142,6 +160,202 @@ function parseTencentSectors(payload, deps) {
     amountUnit: 'base_currency',
     coverage: { fundFlow: 'provider_estimate' },
   });
+}
+
+function normalizeTurnoverDate(value) {
+  const compact = String(value || '').replace(/-/g, '');
+  return /^\d{8}$/.test(compact) ? compact : '';
+}
+
+function formatTurnoverDate(value) {
+  const compact = normalizeTurnoverDate(value);
+  return compact
+    ? `${compact.slice(0, 4)}-${compact.slice(4, 6)}-${compact.slice(6, 8)}`
+    : null;
+}
+
+function formatTurnoverTime(value) {
+  const compact = String(value || '');
+  return /^\d{4}$/.test(compact) ? `${compact.slice(0, 2)}:${compact.slice(2)}` : null;
+}
+
+/**
+ * Tencent day/query rows are:
+ *   HHMM price cumulativeVolume cumulativeAmount
+ * Keep invalid amounts absent rather than coercing them to zero.
+ */
+function parseTencentTurnoverSessions(payload, code) {
+  const node = payload && payload.data && payload.data[code];
+  const rawSessions = node && Array.isArray(node.data) ? node.data : [];
+  const sessions = [];
+  for (const rawSession of rawSessions) {
+    const date = normalizeTurnoverDate(rawSession && rawSession.date);
+    if (!date || !Array.isArray(rawSession.data)) continue;
+    const byTime = new Map();
+    for (const row of rawSession.data) {
+      const fields = String(row || '').trim().split(/\s+/);
+      const time = fields[0];
+      const amount = Number(fields[3]);
+      if (!/^\d{4}$/.test(time || '') || !Number.isFinite(amount) || amount < 0) continue;
+      byTime.set(time, { time, amount });
+    }
+    const points = [...byTime.values()].sort((left, right) => left.time.localeCompare(right.time));
+    // Keep a dated session even when every amount is malformed. This prevents
+    // silently treating an older trading day as the current one.
+    sessions.push({ date, points });
+  }
+  return sessions.sort((left, right) => right.date.localeCompare(left.date));
+}
+
+function latestCommonValue(valueLists, { max = null } = {}) {
+  if (!valueLists.length || valueLists.some((values) => !values.length)) return '';
+  const common = new Set(valueLists[0]);
+  for (const values of valueLists.slice(1)) {
+    const available = new Set(values);
+    for (const value of common) {
+      if (!available.has(value)) common.delete(value);
+    }
+  }
+  return [...common]
+    .filter((value) => max == null || value <= max)
+    .sort()
+    .at(-1) || '';
+}
+
+function unavailableTurnoverComparison(spec, {
+  reason,
+  mode = null,
+  currentDate = null,
+  previousDate = null,
+  asOfTime = null,
+} = {}) {
+  return {
+    available: false,
+    previous: null,
+    change: null,
+    changePct: null,
+    mode,
+    currentDate,
+    previousDate,
+    asOfTime,
+    basis: spec.basis,
+    reason: reason || 'turnover_comparison_unavailable',
+  };
+}
+
+function sumSessionAmounts(sessions, time) {
+  let total = 0;
+  for (const session of sessions) {
+    const point = session.points.find((item) => item.time === time);
+    if (!point || !Number.isFinite(point.amount)) return null;
+    total += point.amount;
+  }
+  return Number.isFinite(total) ? total : null;
+}
+
+/**
+ * Aggregate one or more day/query payloads into a same-source market turnover
+ * and previous-trading-day comparison. For CN, both dates and minute stamps
+ * must be common to the Shanghai and Shenzhen index feeds.
+ */
+function parseTencentMarketTurnover(payloadByCode, market = 'cn') {
+  const normalizedMarket = market === 'hk' ? 'hk' : 'cn';
+  const spec = MARKET_TURNOVER_SPECS[normalizedMarket];
+  const series = spec.codes.map((code) =>
+    parseTencentTurnoverSessions(payloadByCode && payloadByCode[code], code));
+  const currentDates = series.map((sessions) => sessions[0] && sessions[0].date).filter(Boolean);
+  const previousDates = series.map((sessions) => sessions[1] && sessions[1].date).filter(Boolean);
+  const currentDateRaw = currentDates.length === series.length
+    && currentDates.every((date) => date === currentDates[0])
+    ? currentDates[0]
+    : '';
+  const previousDateRaw = previousDates.length === series.length
+    && previousDates.every((date) => date === previousDates[0])
+    ? previousDates[0]
+    : '';
+  if (!currentDateRaw) {
+    return {
+      turnover: null,
+      comparison: unavailableTurnoverComparison(spec, {
+        reason: currentDates.length === series.length
+          ? 'current_trading_day_mismatch'
+          : 'current_turnover_missing',
+      }),
+    };
+  }
+
+  const currentSessions = series.map((sessions) => sessions.find((item) => item.date === currentDateRaw));
+  const currentTime = latestCommonValue(currentSessions.map((session) =>
+    session.points.map((point) => point.time)));
+  const currentDate = formatTurnoverDate(currentDateRaw);
+  const previousDate = formatTurnoverDate(previousDateRaw);
+  const asOfTime = formatTurnoverTime(currentTime);
+  const mode = currentTime && currentTime >= spec.closeTime
+    ? 'previous_trading_day_close'
+    : 'previous_trading_day_same_time';
+  const turnover = currentTime ? sumSessionAmounts(currentSessions, currentTime) : null;
+  if (turnover == null) {
+    return {
+      turnover: null,
+      comparison: unavailableTurnoverComparison(spec, {
+        reason: 'current_turnover_missing', mode, currentDate, previousDate, asOfTime,
+      }),
+    };
+  }
+  if (!previousDateRaw) {
+    return {
+      turnover,
+      comparison: unavailableTurnoverComparison(spec, {
+        reason: 'previous_trading_day_missing', mode, currentDate, asOfTime,
+      }),
+    };
+  }
+
+  const previousSessions = series.map((sessions) => sessions.find((item) => item.date === previousDateRaw));
+  const previousTime = latestCommonValue(
+    previousSessions.map((session) => session.points.map((point) => point.time)),
+    mode === 'previous_trading_day_same_time' ? { max: currentTime } : {},
+  );
+  if (mode === 'previous_trading_day_same_time' && previousTime !== currentTime) {
+    return {
+      turnover,
+      comparison: unavailableTurnoverComparison(spec, {
+        reason: 'previous_same_time_missing', mode, currentDate, previousDate, asOfTime,
+      }),
+    };
+  }
+  if (!previousTime || (mode === 'previous_trading_day_close' && previousTime < spec.closeTime)) {
+    return {
+      turnover,
+      comparison: unavailableTurnoverComparison(spec, {
+        reason: 'previous_turnover_missing', mode, currentDate, previousDate, asOfTime,
+      }),
+    };
+  }
+  const previous = sumSessionAmounts(previousSessions, previousTime);
+  if (previous == null) {
+    return {
+      turnover,
+      comparison: unavailableTurnoverComparison(spec, {
+        reason: 'previous_turnover_missing', mode, currentDate, previousDate, asOfTime,
+      }),
+    };
+  }
+  const change = turnover - previous;
+  return {
+    turnover,
+    comparison: {
+      available: true,
+      previous,
+      change,
+      changePct: previous > 0 ? +((change / previous) * 100).toFixed(2) : null,
+      mode,
+      currentDate,
+      previousDate,
+      asOfTime,
+      basis: spec.basis,
+    },
+  };
 }
 
 function parseTencentQuote(text, code, deps) {
@@ -347,6 +561,37 @@ function createTencentProvider({
     return parseTencentSectors(payload, deps);
   }
 
+  async function getMarketTurnover(market = 'cn') {
+    const normalizedMarket = market === 'hk' ? 'hk' : 'cn';
+    const spec = MARKET_TURNOVER_SPECS[normalizedMarket];
+    const payloads = await Promise.all(spec.codes.map(async (code) => {
+      const payload = JSON.parse(await fetchText(
+        `https://web.ifzq.gtimg.cn/appstock/app/day/query?code=${code}`
+      ));
+      return [code, payload];
+    }));
+    const data = parseTencentMarketTurnover(Object.fromEntries(payloads), normalizedMarket);
+    const currentDate = data.comparison.currentDate
+      ? data.comparison.currentDate.replace(/-/g, '')
+      : '';
+    return annotateMarketData(data, {
+      market: normalizedMarket,
+      source: '腾讯行情',
+      currency: spec.currency,
+      timezone: spec.timezone,
+      asOf: currentDate && data.comparison.asOfTime
+        ? isoMinuteTime(currentDate, data.comparison.asOfTime)
+        : '',
+      adjustmentBasis: 'none',
+      amountUnit: 'base_currency',
+      coverage: {
+        turnover: spec.coverage,
+        turnoverBasis: spec.basis,
+        turnoverComparison: '盘中对比前一交易日同期，收盘后对比前一交易日收盘',
+      },
+    });
+  }
+
   async function getQuote(code) {
     const text = await fetchText(`https://qt.gtimg.cn/q=${code}`, { encoding: 'gbk' });
     return parseTencentQuote(text, code, deps);
@@ -370,6 +615,7 @@ function createTencentProvider({
     getMinute,
     getKline,
     getSectors,
+    getMarketTurnover,
     getQuote,
     getQuotes,
     searchStocks,
@@ -379,10 +625,13 @@ function createTencentProvider({
 module.exports = {
   CN_INDICES,
   HK_INDICES,
+  MARKET_TURNOVER_SPECS,
   parseTencentIndices,
   parseTencentMinute,
   parseTencentKline,
   parseTencentSectors,
+  parseTencentTurnoverSessions,
+  parseTencentMarketTurnover,
   parseTencentQuote,
   parseTencentQuotes,
   parseTencentSearch,

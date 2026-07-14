@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 
 const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'market-chat-research-'));
 process.env.MARKET_DISABLE_WARM = '1';
+process.env.MARKET_DISABLE_REVIEW = '1';
 process.env.MARKET_DATA_DIR = TEST_DATA_DIR;
 process.env.LLM_BASE_URL = 'http://mock-llm.local/v1';
 process.env.LLM_API_KEY = 'test-key';

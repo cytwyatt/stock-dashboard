@@ -49,7 +49,7 @@ function createMarketData({
   for (const method of ['getIndices', 'getMinute', 'getKline', 'getQuote', 'getQuotes', 'getRank', 'getOverview']) {
     requireMethod(yahoo, method, 'yahoo');
   }
-  for (const method of ['getIndices', 'getMinute', 'getKline', 'getSectors', 'getQuote', 'getQuotes', 'searchStocks']) {
+  for (const method of ['getIndices', 'getMinute', 'getKline', 'getSectors', 'getMarketTurnover', 'getQuote', 'getQuotes', 'searchStocks']) {
     requireMethod(tencent, method, 'tencent');
   }
   for (const method of ['getRankCN', 'getRankHK', 'countLimit', 'getNews', 'getStockNewsCN']) {
@@ -104,12 +104,40 @@ function createMarketData({
 
   async function getOverviewCN(sectorEntry) {
     const breadth = summarizeSectorBreadth(sectorEntry.data);
-    const [limitUp, limitDown] = await Promise.all([
+    const sectorTurnover = breadth.turnover;
+    const [limitUp, limitDown, marketTurnover] = await Promise.all([
       sina.countLimit('up'),
       sina.countLimit('down'),
+      tencent.getMarketTurnover('cn').catch(() => null),
     ]);
+    const hasMarketTurnover = marketTurnover
+      && Number.isFinite(marketTurnover.turnover)
+      && marketTurnover.turnover >= 0;
+    const turnover = hasMarketTurnover ? marketTurnover.turnover : sectorTurnover;
+    const comparison = hasMarketTurnover && marketTurnover.comparison
+      ? marketTurnover.comparison
+      : {
+          available: false,
+          previous: null,
+          change: null,
+          changePct: null,
+          mode: null,
+          currentDate: null,
+          previousDate: null,
+          asOfTime: null,
+          basis: hasMarketTurnover ? 'sh_sz_market_total' : 'sector_sum_fallback',
+          reason: hasMarketTurnover
+            ? 'turnover_comparison_unavailable'
+            : 'market_turnover_unavailable',
+        };
+    const turnoverAsOf = hasMarketTurnover && comparison.currentDate && comparison.asOfTime
+      ? `${comparison.currentDate}T${comparison.asOfTime}:00+08:00`
+      : '';
     return annotateMarketData({
       ...breadth,
+      sectorTurnover,
+      turnover,
+      comparison,
       down: null,
       flat: null,
       breadthBasis: 'sector_up_vs_total',
@@ -121,8 +149,8 @@ function createMarketData({
       source: '腾讯行情 / 新浪财经',
       currency: 'CNY',
       timezone: 'Asia/Shanghai',
-      asOf: new Date(sectorEntry.fetchedAt).toISOString(),
-      asOfBasis: 'fetch_time',
+      asOf: turnoverAsOf || new Date(sectorEntry.fetchedAt).toISOString(),
+      asOfBasis: turnoverAsOf ? 'provider' : 'fetch_time',
       stale: sectorEntry.stale,
       staleSince: sectorEntry.staleSince
         ? new Date(sectorEntry.staleSince).toISOString()
@@ -131,12 +159,19 @@ function createMarketData({
       amountUnit: 'base_currency',
       coverage: {
         breadth: '行业上涨家数 / 行业总家数；未上涨包含平盘与停牌',
+        turnover: hasMarketTurnover
+          ? '沪深市场累计成交额（不含北交所）'
+          : '腾讯行业成交汇总（沪深成交额不可用时降级）',
+        turnoverBasis: comparison.basis,
+        turnoverComparisonAvailable: comparison.available,
         priceLimitRules: '主板10%、创业板/科创板20%、北交所30%',
         priceLimitExclusions: 'N/C新股、ST、退市整理',
         priceLimitComplete: limitUp.complete && limitDown.complete,
       },
     });
   }
+
+  const getOverviewHK = () => tencent.getMarketTurnover('hk');
 
   const getRankCN = (dir, count) => sina.getRankCN(dir, count);
   const getRankHK = (dir, count) => sina.getRankHK(dir, count);
@@ -157,6 +192,7 @@ function createMarketData({
     getQuotes,
     searchStocks: (query) => tencent.searchStocks(query),
     getOverviewCN,
+    getOverviewHK,
     getOverviewUS: () => yahoo.getOverview(),
     getNews: (count) => sina.getNews(count),
     getStockNewsCN: (code) => sina.getStockNewsCN(code),

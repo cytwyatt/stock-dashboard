@@ -24,6 +24,7 @@ function createCacheWarmer({ marketService, isMarketOpen, logger = console }) {
       warm('minute:hkHSI', () => marketService.minute('hkHSI'));
       warm('rank:hk:up', () => marketService.rank('hk', 'up'));
       warm('rank:hk:down', () => marketService.rank('hk', 'down'));
+      warm('overview:hk', () => marketService.overview('hk'));
       warm('news', () => marketService.news());
     }
     if (isMarketOpen('us')) {

@@ -12,6 +12,7 @@ function createHttpHandler({
   auth,
   staticServer,
   marketService,
+  marketReviewService,
   marketSummaryService,
   chatService,
   llmConfigStore,
@@ -93,6 +94,15 @@ function createHttpHandler({
         return sendMarketJSON(res, entry, { market }, marketMeta);
       }
       if (pathname === '/api/market-summary') {
+        if (marketReviewService) {
+          if (req.method !== 'GET') return sendJSON(res, 405, { error: 'method not allowed' });
+          const requestedMarket = url.searchParams.get('market');
+          const market = requestedMarket === 'us' || requestedMarket === 'hk'
+            ? requestedMarket
+            : 'cn';
+          const entry = await marketReviewService.ensureReview(market);
+          return sendMarketJSON(res, entry, { market, currency: null }, marketMeta);
+        }
         if (req.method !== 'GET' && req.method !== 'POST') {
           return sendJSON(res, 405, { error: 'method not allowed' });
         }
@@ -112,6 +122,18 @@ function createHttpHandler({
           ? requestedMarket
           : 'cn';
         const entry = await marketSummaryService.getSummary(market, { force });
+        return sendMarketJSON(res, entry, { market, currency: null }, marketMeta);
+      }
+      if (pathname === '/api/market-review') {
+        if (req.method !== 'GET') return sendJSON(res, 405, { error: 'method not allowed' });
+        if (!marketReviewService || typeof marketReviewService.ensureReview !== 'function') {
+          return sendJSON(res, 503, { error: 'market review unavailable' });
+        }
+        const requestedMarket = url.searchParams.get('market');
+        const market = requestedMarket === 'us' || requestedMarket === 'hk'
+          ? requestedMarket
+          : 'cn';
+        const entry = await marketReviewService.ensureReview(market);
         return sendMarketJSON(res, entry, { market, currency: null }, marketMeta);
       }
 
@@ -284,7 +306,10 @@ function createHttpHandler({
         return sendJSON(res, 200, (await marketService.search(query)).data);
       }
       if (pathname === '/api/overview') {
-        const market = url.searchParams.get('market') === 'us' ? 'us' : 'cn';
+        const requestedMarket = url.searchParams.get('market');
+        const market = requestedMarket === 'us' || requestedMarket === 'hk'
+          ? requestedMarket
+          : 'cn';
         const entry = await marketService.overview(market);
         return sendMarketJSON(res, entry, {
           market,
