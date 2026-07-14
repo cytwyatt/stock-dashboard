@@ -33,18 +33,17 @@
       <div class="index-cards" id="indexCards"></div>
     </section>
 
-    <!-- AI 大盘总结（A股 / 港股 / 美股） -->
+    <!-- AI 盘后复盘（A股 / 港股 / 美股） -->
     <section class="section card market-summary-card" id="marketSummarySection" style="display:block">
       <div class="section-head market-summary-head">
         <div class="section-heading">
-          <h2 id="marketSummaryTitle">✨ AI 大盘总结</h2>
+          <h2 id="marketSummaryTitle">✨ AI 盘后复盘</h2>
           <span class="data-meta" id="marketSummaryDataMeta"></span>
         </div>
-        <button type="button" class="market-summary-action" id="marketSummaryRefresh">重新分析</button>
       </div>
       <div class="market-summary-notice" id="marketSummaryNotice" role="status" style="display:none"></div>
-      <div class="market-summary-content" id="marketSummaryContent" aria-live="polite" aria-busy="false">
-        <div class="market-summary-state market-summary-loading"><span aria-hidden="true">●</span> 正在生成市场总结…</div>
+      <div class="market-summary-content" id="marketSummaryContent" aria-live="polite" aria-busy="true">
+        <div class="market-summary-state market-summary-loading"><span aria-hidden="true">●</span> 正在读取盘后复盘…</div>
       </div>
     </section>
 
@@ -155,6 +154,18 @@
       数据来源：腾讯行情 / 新浪财经 / Yahoo Finance · 仅供参考，不构成投资建议 · 行情数据可能有延迟
     </footer>
   </main>
+
+  <!-- AI 盘后复盘详情 -->
+  <dialog class="market-review-dialog" id="marketReviewDialog" aria-modal="true" aria-labelledby="marketReviewDialogTitle">
+    <div class="market-review-dialog-head">
+      <div class="market-review-dialog-heading">
+        <h2 id="marketReviewDialogTitle">AI 盘后复盘</h2>
+        <span class="data-meta" id="marketReviewDialogMeta"></span>
+      </div>
+      <button type="button" class="market-review-dialog-close" id="marketReviewDialogClose" aria-label="关闭盘后复盘详情" title="关闭">✕</button>
+    </div>
+    <article class="market-review-dialog-content" id="marketReviewDialogContent"></article>
+  </dialog>
 
   <!-- 个股详情弹窗 -->
   <div class="modal-mask" id="stockModal" style="display:none">

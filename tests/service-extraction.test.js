@@ -65,3 +65,25 @@ test('缓存预热只通过 marketService 调用当前开市市场', async () =>
     ['news'],
   ]);
 });
+
+test('港股开市时预热独立市场概况成交额', async () => {
+  const calls = [];
+  const marketService = new Proxy({}, {
+    get: (_, method) => async (...args) => { calls.push([method, ...args]); },
+  });
+  const warmer = createCacheWarmer({
+    marketService,
+    isMarketOpen: (market) => market === 'hk',
+    logger: { error() {} },
+  });
+  warmer.warmOnce();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls, [
+    ['indices', 'hk'],
+    ['minute', 'hkHSI'],
+    ['rank', 'hk', 'up'],
+    ['rank', 'hk', 'down'],
+    ['overview', 'hk'],
+    ['news'],
+  ]);
+});

@@ -1,6 +1,7 @@
 'use strict';
 
 process.env.MARKET_DISABLE_WARM = '1';
+process.env.MARKET_DISABLE_REVIEW = '1';
 process.env.MARKET_DATA_DIR = '/tmp/market-api-contract-test';
 
 const test = require('node:test');
@@ -106,6 +107,24 @@ function installFetchFixture() {
         },
       });
     }
+    if (url.includes('appstock/app/day/query?code=sh000001')) {
+      return jsonResponse({ data: { sh000001: { data: [
+        { date: '20260714', data: ['1500 3200 100 1000'] },
+        { date: '20260713', data: ['1500 3180 90 900'] },
+      ] } } });
+    }
+    if (url.includes('appstock/app/day/query?code=sz399001')) {
+      return jsonResponse({ data: { sz399001: { data: [
+        { date: '20260714', data: ['1500 12000 200 2000'] },
+        { date: '20260713', data: ['1500 11800 170 1700'] },
+      ] } } });
+    }
+    if (url.includes('appstock/app/day/query?code=hkHSI')) {
+      return jsonResponse({ data: { hkHSI: { data: [
+        { date: '20260714', data: ['1600 24300 200 3200'] },
+        { date: '20260713', data: ['1600 24100 180 3000'] },
+      ] } } });
+    }
     if (url.includes('Market_Center.getHQNodeData')) {
       const down = url.includes('asc=1');
       return jsonResponse(down
@@ -199,12 +218,34 @@ test('行情API统一返回data/meta并保留金融口径', async () => {
       },
       { up: 2, nonUp: 1, down: null, total: 3 }
     );
-    assert.equal(overview.body.data.turnover, 1000000);
+    assert.equal(overview.body.data.turnover, 3000);
+    assert.equal(overview.body.data.sectorTurnover, 1000000);
+    assert.deepEqual(overview.body.data.comparison, {
+      available: true,
+      previous: 2600,
+      change: 400,
+      changePct: 15.38,
+      mode: 'previous_trading_day_close',
+      currentDate: '2026-07-14',
+      previousDate: '2026-07-13',
+      asOfTime: '15:00',
+      basis: 'sh_sz_market_total',
+    });
     assert.equal(overview.body.data.limitUp, 1);
     assert.equal(overview.body.data.limitDown, 1);
     assert.equal(overview.body.meta.amountUnit, 'base_currency');
-    assert.equal(overview.body.meta.asOfBasis, 'fetch_time');
+    assert.equal(overview.body.meta.asOfBasis, 'provider');
+    assert.equal(overview.body.meta.asOf, '2026-07-14T15:00:00+08:00');
     assert.match(overview.body.meta.coverage.priceLimitRules, /北交所30%/);
+    assert.match(overview.body.meta.coverage.turnover, /不含北交所/);
+
+    const hkOverview = await requestJSON(port, '/api/overview?market=hk');
+    assert.equal(hkOverview.status, 200);
+    assert.equal(hkOverview.body.meta.market, 'hk');
+    assert.equal(hkOverview.body.meta.currency, 'HKD');
+    assert.equal(hkOverview.body.data.turnover, 3200);
+    assert.equal(hkOverview.body.data.comparison.changePct, 6.67);
+    assert.equal(hkOverview.body.data.comparison.basis, 'tencent_hsi_market_turnover');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     cache.clear();

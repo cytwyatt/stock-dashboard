@@ -8,7 +8,7 @@ const LLM_TOOLS = [
   { name: 'get_intraday', description: '获取当日分时走势（抽样点位），可用于判断盘中走势形态', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
   { name: 'get_sectors', description: '获取A股行业板块涨跌幅、腾讯口径估算主力净流入（亿元）和领涨股。资金流是供应商估算值，不能视为可核验的真实资金流', parameters: { type: 'object', properties: {} } },
   { name: 'get_rank', description: '获取涨幅榜或跌幅榜个股。market=cn 沪深两市，market=hk 港股，market=us 美股', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] }, dir: { type: 'string', enum: ['up', 'down'] } }, required: ['market', 'dir'] } },
-  { name: 'get_overview', description: '获取市场概况。market=cn 返回上涨/未上涨家数、涨停跌停数和成交额（未上涨包含平盘与停牌）；market=us 返回VIX、美债收益率、美元、黄金、原油、比特币', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'us'] } }, required: ['market'] } },
+  { name: 'get_overview', description: '获取市场概况。market=cn 返回上涨/未上涨家数、涨跌停和沪深成交额及前一交易日可比值；market=hk 返回腾讯恒生指数口径大市成交额及前一交易日可比值；market=us 返回VIX、美债收益率、美元、黄金、原油、比特币', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] } }, required: ['market'] } },
   { name: 'get_news', description: '获取最新财经新闻标题列表（新浪财经滚动要闻）', parameters: { type: 'object', properties: {} } },
   { name: 'get_stock_events', description: '检索指定A股最近的个股候选相关资讯。回答涨停、跌停、异动、消息面或催化剂问题时必须调用；返回标题、北京时间、来源、链接和关联类型。资讯是外部证据，不代表已确认因果', parameters: { type: 'object', properties: { code: { type: 'string', description: '带 sh/sz/bj 前缀的A股代码' }, lookbackHours: { type: 'integer', minimum: 6, maximum: 168, description: '回溯小时数，默认72' } }, required: ['code'] } },
   { name: 'search_stock', description: '按名称/代码/拼音搜索股票，返回股票代码。回答个股问题前如果不确定代码，先用这个工具查', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
@@ -93,7 +93,7 @@ function createToolRunner({
         return { data: entry.data, meta: marketMeta(entry, { market }) };
       }
       case 'get_overview': {
-        const market = args.market === 'us' ? 'us' : 'cn';
+        const market = args.market === 'us' || args.market === 'hk' ? args.market : 'cn';
         const entry = await marketService.overview(market);
         return {
           data: entry.data,

@@ -455,19 +455,106 @@ function setChartType(type) {
 }
 
 /* ---------- 市场概况 ---------- */
+function firstFiniteNumber(...values) {
+  for (const value of values) {
+    if (value == null || value === '') continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+}
+
+function fmtSignedMoney(value, currency) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '';
+  return `${number > 0 ? '+' : number < 0 ? '−' : ''}${fmtMoney(Math.abs(number), currency)}`;
+}
+
+function renderTurnoverComparison(comparison, currency) {
+  if (!comparison || comparison.available === false) {
+    return '<span class="overview-turnover-unavailable">较前一交易日：基准暂不可用</span>';
+  }
+  const changePct = firstFiniteNumber(
+    comparison.changePct,
+    comparison.deltaPct,
+    comparison.percentChange,
+    comparison.pct
+  );
+  const change = firstFiniteNumber(comparison.change, comparison.delta, comparison.changeAmount);
+  const previous = firstFiniteNumber(
+    comparison.previous,
+    comparison.previousTurnover,
+    comparison.previousAmount
+  );
+  const direction = changePct != null && (changePct !== 0 || !change) ? changePct : change;
+  if (direction == null) {
+    return '<span class="overview-turnover-unavailable">较前一交易日：基准暂不可用</span>';
+  }
+
+  const mode = summaryText(comparison.mode || comparison.basis).toLowerCase();
+  const sameTime = mode.includes('same_time');
+  const label = sameTime ? '较前一交易日同期' : '较前一交易日';
+  const arrow = direction > 0 ? '↑' : direction < 0 ? '↓' : '→';
+  const pctText = changePct == null
+    ? ''
+    : `${changePct > 0 ? '+' : ''}${changePct.toFixed(2)}%`;
+  const amountText = change == null ? '' : fmtSignedMoney(change, currency);
+  const comparisonText = [pctText, amountText].filter(Boolean).join(' · ');
+  const previousDate = summaryText(
+    comparison.previousDate || comparison.baseDate || comparison.date
+  );
+  const currentDate = summaryText(comparison.currentDate);
+  const asOfTime = summaryText(comparison.asOfTime);
+  const basisLabels = {
+    sh_sz_market_total: '沪深市场合计',
+    tencent_hsi_market_turnover: '腾讯恒生指数大市口径',
+    sector_sum_fallback: '行业汇总降级口径',
+  };
+  const basis = summaryText(comparison.basis).toLowerCase();
+  const basisDetail = [
+    sameTime ? '同一时点口径' : '全日口径',
+    basisLabels[basis] || '',
+  ].filter(Boolean).join(' · ');
+  const details = [
+    currentDate ? `本期 ${currentDate}${asOfTime ? ` ${asOfTime}` : ''}` : '',
+    previousDate ? `基准 ${previousDate}` : '',
+    basisDetail,
+    previous == null ? '' : `前值 ${fmtMoney(previous, currency)}`,
+  ].filter(Boolean);
+  return `<span class="overview-turnover-comparison" title="${escapeHtml(details.join(' · '))}">
+    <span class="overview-turnover-change ${colorCls(direction)}">${arrow} ${escapeHtml(label)}${comparisonText ? ` ${escapeHtml(comparisonText)}` : ''}</span>
+    <span class="overview-turnover-detail">${escapeHtml(details.join(' · '))}</span>
+  </span>`;
+}
+
+function renderTurnoverOverview(label, turnover, currency, comparison, standalone = false) {
+  const amount = turnover == null || turnover === '' ? '--' : fmtMoney(turnover, currency);
+  return `<div class="overview-turnover${standalone ? ' overview-turnover-standalone' : ''}">
+    <span class="overview-turnover-current">
+      <span class="overview-turnover-label">${escapeHtml(label)}</span>
+      <b>${amount}</b>
+    </span>
+    ${renderTurnoverComparison(comparison, currency)}
+  </div>`;
+}
+
 async function loadOverview() {
   const market = state.market;
-  if (market !== 'cn' && market !== 'us') return; // 港股暂无概况数据
+  if (market !== 'cn' && market !== 'hk' && market !== 'us') return;
   const d = await api(`/api/overview?market=${market}`);
   if (market !== state.market) return; // 响应回来前切了 tab，丢弃
   const el = $('#overviewContent');
-  setDataMeta($('#overviewDataMeta'), d._meta, { showCurrency: market === 'cn' });
+  setDataMeta($('#overviewDataMeta'), d._meta, { showCurrency: market !== 'us' });
   if (market === 'cn') {
-    $('#overviewTitle').textContent = '市场概况 · A股行业汇总';
+    $('#overviewTitle').textContent = '市场概况 · A股';
     const upW = d.total ? Math.max(0, Math.min(100, (d.up / d.total) * 100)) : 0;
     const nonUpW = Math.max(0, 100 - upW);
     const limitUp = `${d.limitUp}${d.limitCountComplete === false ? '+' : ''}`;
     const limitDown = `${d.limitDown}${d.limitCountComplete === false ? '+' : ''}`;
+    const turnoverComparison = d.turnoverComparison || d.comparison;
+    const turnoverLabel = turnoverComparison && turnoverComparison.basis === 'sector_sum_fallback'
+      ? '行业成交汇总'
+      : '沪深成交额';
     el.innerHTML = `
       <div class="breadth-stats">
         <span class="c-up">上涨 ${d.up} 家</span>
@@ -480,13 +567,23 @@ async function loadOverview() {
       <div class="overview-chips">
         <span>涨停 <b class="c-up">${limitUp}</b> 家</span>
         <span>跌停 <b class="c-down">${limitDown}</b> 家</span>
-        <span>行业成交汇总 <b>${fmtMoney(d.turnover, 'CNY')}</b></span>
+        ${renderTurnoverOverview(turnoverLabel, d.turnover, 'CNY', turnoverComparison)}
       </div>`;
+  } else if (market === 'hk') {
+    $('#overviewTitle').textContent = '港股大市成交额';
+    el.innerHTML = renderTurnoverOverview(
+      '大市成交额',
+      d && d.turnover,
+      (d && d._meta && d._meta.currency) || 'HKD',
+      d && (d.turnoverComparison || d.comparison),
+      true
+    );
   } else {
     $('#overviewTitle').textContent = '市场概况 · 宏观情绪';
+    const macro = Array.isArray(d) ? d : [];
     el.innerHTML = `
       <div class="macro-grid">
-        ${d
+        ${macro
           .map(
             (q) => `
         <div class="macro-item" data-code="${escapeHtml(q.code)}" data-name="${escapeHtml(q.name)}">
@@ -1047,7 +1144,7 @@ function renderBook(q) {
       <div class="ob-head">卖盘（手）</div>
       ${q.asks.map((a, i) => row('卖' + cn[i], a)).join('')}
     </div>`;
-  el.style.display = '';
+  el.style.display = 'grid';
 }
 
 async function loadModalChart() {
@@ -1139,8 +1236,12 @@ async function loadNews() {
     .join('');
 }
 
-/* ---------- AI 大盘总结 ---------- */
+/* ---------- AI 盘后复盘 ---------- */
 let summaryReq = 0;
+let activeMarketReview = null;
+let marketReviewReturnFocus = null;
+let marketReviewNeedsPolling = false;
+let lastMarketReviewAt = 0;
 
 const summaryText = (value) =>
   typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
@@ -1152,27 +1253,22 @@ function summaryStanceClass(stance) {
   return 'neutral';
 }
 
-function summarySessionLabel(session) {
-  const value = session && typeof session === 'object'
-    ? summaryText(session.label) || summaryText(session.state)
-    : summaryText(session);
-  const labels = {
-    pre: '盘前', premarket: '盘前', open: '盘中', regular: '盘中',
-    post: '盘后', postmarket: '盘后', closed: '休市', holiday: '休市',
-  };
-  return labels[value.toLowerCase()] || value;
-}
-
 const SUMMARY_CLAIM_LABELS = {
   observation: '事实',
   association: '关联',
   causal: '事件归因',
+  reported_cause: '报道归因',
 };
 
 const SUMMARY_EVIDENCE_LABELS = {
   indices: '主要指数',
   overview: '市场概况',
+  indexHistory: '多周期指数',
   sectors: '行业板块',
+  usSectorProxies: '美股行业 ETF 代理',
+  turnover: '成交额',
+  news: '财经资讯',
+  marketNews: '市场资讯',
   representativeGainers: '代表性领涨样本',
   representativeLosers: '代表性领跌样本',
   macroProxies: '跨资产信号',
@@ -1202,51 +1298,62 @@ function normalizeSummaryItems(items) {
   if (!Array.isArray(items)) return [];
   return items.map((item) => {
     if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      return { text: summaryText(item), evidenceRefs: [], claimType: '' };
+      return { text: summaryText(item), evidenceRefs: [], citationRefs: [], claimType: '' };
     }
     const refs = Array.isArray(item.evidenceRefs)
       ? item.evidenceRefs.map(summaryText).filter(Boolean)
       : [];
+    const citationRefs = Array.isArray(item.citationRefs)
+      ? item.citationRefs.map(summaryText).filter(Boolean)
+      : [];
     return {
       text: summaryText(item.text) || summaryText(item.message) || summaryText(item.label),
       evidenceRefs: refs,
+      citationRefs,
       claimType: summaryText(item.claimType),
     };
   }).filter((item) => item.text);
 }
 
-function renderSummaryItems(items, emptyText) {
+function renderReviewCitationRefs(refs, citationsById) {
+  const values = Array.isArray(refs) ? refs.map(summaryText).filter(Boolean) : [];
+  if (!values.length) return '';
+  return `<span class="market-review-source-refs">${values.map((ref) => {
+    const citation = citationsById && citationsById.get(ref);
+    const label = citation
+      ? summaryText(citation.source) || summaryText(citation.title) || `来源 ${ref}`
+      : `来源 ${ref}`;
+    const url = citation ? safeHttpUrl(citation.url) : '#';
+    return url === '#'
+      ? `<span>${escapeHtml(label)}</span>`
+      : `<a href="${url}" target="_blank" rel="noopener noreferrer">${escapeHtml(label)}</a>`;
+  }).join(' · ')}</span>`;
+}
+
+function renderSummaryItems(items, emptyText, citationsById = null) {
   const values = normalizeSummaryItems(items);
   return values.length
     ? `<ul class="market-summary-list">${values.map((item) => {
         const claimLabel = SUMMARY_CLAIM_LABELS[item.claimType] || item.claimType;
         const evidence = renderSummaryEvidenceRefs(item.evidenceRefs);
+        const citations = renderReviewCitationRefs(item.citationRefs, citationsById);
         const claim = claimLabel
           ? `<span class="market-summary-claim">${escapeHtml(claimLabel)}</span>`
           : '';
-        return `<li><span class="market-summary-item-text">${escapeHtml(item.text)}</span>${claim || evidence
-          ? `<span class="market-summary-item-meta">${claim}${evidence}</span>`
+        return `<li><span class="market-summary-item-text">${escapeHtml(item.text)}</span>${claim || evidence || citations
+          ? `<span class="market-summary-item-meta">${claim}${evidence}${citations}</span>`
           : ''}</li>`;
       }).join('')}</ul>`
     : `<p class="market-summary-empty">${escapeHtml(emptyText)}</p>`;
 }
 
-function renderSummaryWarnings(items) {
+function renderSummaryWarnings(items, citationsById = null) {
   const warnings = normalizeSummaryItems(items);
   if (!warnings.length) return '';
   return `<aside class="market-summary-data-warnings">
     <h3>数据提示</h3>
-    ${renderSummaryItems(warnings, '')}
+    ${renderSummaryItems(warnings, '', citationsById)}
   </aside>`;
-}
-
-function summaryObjectLabel(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return summaryText(value);
-  return summaryText(value.label)
-    || summaryText(value.text)
-    || summaryText(value.name)
-    || summaryText(value.value)
-    || summaryText(value.code);
 }
 
 function renderSummaryConfidence(value) {
@@ -1270,23 +1377,6 @@ function renderSummaryConfidence(value) {
     : '';
 }
 
-function summaryTimeRange(data, timezone) {
-  const rangeValue = [data.evidenceTimeRange, data.evidenceRange, data.evidenceAsOfRange]
-    .find((value) => value != null && value !== '');
-  if (rangeValue && typeof rangeValue !== 'object') return summaryText(rangeValue);
-  const range = Array.isArray(rangeValue)
-    ? { earliest: rangeValue[0], latest: rangeValue[rangeValue.length - 1] }
-    : rangeValue || {};
-  const earliestRaw = data.evidenceEarliestAsOf || data.earliestEvidenceAsOf
-    || data.earliestDataAsOf || range.earliest || range.start;
-  const latestRaw = data.evidenceLatestAsOf || data.latestEvidenceAsOf
-    || data.latestDataAsOf || range.latest || range.end;
-  const earliest = shortAsOf(earliestRaw, timezone);
-  const latest = shortAsOf(latestRaw, timezone);
-  if (earliest && latest) return earliest === latest ? earliest : `${earliest} — ${latest}`;
-  return earliest || latest;
-}
-
 function setSummaryNotice(text, type = 'warning') {
   const el = $('#marketSummaryNotice');
   el.textContent = text || '';
@@ -1297,155 +1387,300 @@ function setSummaryNotice(text, type = 'warning') {
 function setSummaryBusy(busy) {
   const card = $('#marketSummarySection');
   const content = $('#marketSummaryContent');
-  const btn = $('#marketSummaryRefresh');
   card.classList.toggle('is-loading', busy);
   content.setAttribute('aria-busy', busy ? 'true' : 'false');
-  btn.disabled = busy;
-  btn.textContent = busy ? '分析中…' : '重新分析';
 }
 
 function renderSummaryLoading(market) {
   const content = $('#marketSummaryContent');
-  content.dataset.hasSummary = 'false';
-  content.innerHTML = `<div class="market-summary-state market-summary-loading"><span aria-hidden="true">●</span> 正在生成${escapeHtml(MARKET_LABELS[market] || '')}市场总结…</div>`;
+  content.dataset.hasReview = 'false';
+  content.innerHTML = `<div class="market-summary-state market-summary-loading"><span aria-hidden="true">●</span> 正在读取${escapeHtml(MARKET_LABELS[market] || '')}盘后复盘…</div>`;
 }
 
-function renderSummaryUnconfigured(data) {
+function renderReviewUnavailable(data) {
   const marketLabel = summaryText(data.marketLabel) || MARKET_LABELS[state.market] || '当前市场';
+  const status = summaryText(data.status).toLowerCase();
+  marketReviewNeedsPolling = status === 'scheduled' || status === 'retry_pending';
+  const defaults = {
+    scheduled: {
+      title: `${marketLabel}复盘将在收盘后生成`,
+      message: '当前尚未到复盘生成时间，收盘数据完整后会自动生成。',
+    },
+    retry_pending: {
+      title: `${marketLabel}复盘正在等待重试`,
+      message: '本次生成暂未完成，系统稍后会自动重试。',
+    },
+    unconfigured: {
+      title: '尚未配置 AI 模型',
+      message: `完成模型和 API Key 设置后，即可生成${marketLabel}盘后复盘。`,
+    },
+  };
+  const copy = defaults[status] || {
+    title: `${marketLabel}盘后复盘暂未就绪`,
+    message: '完整收盘数据就绪后会自动生成，请稍后查看。',
+  };
   const content = $('#marketSummaryContent');
-  content.dataset.hasSummary = 'false';
+  content.dataset.hasReview = 'false';
   content.innerHTML = `
     <div class="market-summary-state">
       <div class="market-summary-state-copy">
-        <strong>尚未配置 AI 模型</strong>
-        <span>完成模型和 API Key 设置后，即可生成${escapeHtml(marketLabel)}大盘总结。</span>
-        <button type="button" class="market-summary-config" data-summary-config>前往模型设置</button>
+        <strong>${escapeHtml(copy.title)}</strong>
+        <span>${escapeHtml(summaryText(data.message) || copy.message)}</span>
+        ${status === 'unconfigured'
+          ? '<button type="button" class="market-summary-config" data-summary-config>前往模型设置</button>'
+          : ''}
       </div>
     </div>`;
 }
 
 function renderSummaryError() {
   const content = $('#marketSummaryContent');
-  content.dataset.hasSummary = 'false';
+  content.dataset.hasReview = 'false';
   content.innerHTML = `
     <div class="market-summary-state">
       <div class="market-summary-state-copy">
-        <strong>AI 总结暂时不可用</strong>
-        <span>可以稍后重试，其他行情区块不受影响。</span>
+        <strong>AI 盘后复盘暂时不可用</strong>
+        <span>系统稍后会自动重试，其他行情区块不受影响。</span>
       </div>
     </div>`;
 }
 
-function renderMarketSummary(data) {
-  const marketLabel = summaryText(data.marketLabel) || MARKET_LABELS[data.market] || MARKET_LABELS[state.market] || '';
-  const stance = summaryText(data.stance) || '中性';
-  const headline = summaryText(data.headline) || '当前数据不足，暂时无法形成明确的市场结论。';
-  const breadthObject = data.breadth && typeof data.breadth === 'object' && !Array.isArray(data.breadth)
-    ? data.breadth
-    : null;
-  const breadthAvailable = data.breadthAvailable !== false
-    && !(breadthObject && (breadthObject.available === false || breadthObject.status === 'unavailable'));
-  const breadth = summaryText(data.breadth)
-    || (breadthObject && (summaryText(breadthObject.text) || summaryText(breadthObject.summary)))
-    || (breadthAvailable ? '暂无足够的市场广度数据。' : '当前未提供全市场广度数据。');
-  const breadthTitle = breadthAvailable ? '市场广度' : '数据覆盖';
-  const signals = Array.isArray(data.signals) ? data.signals : data.drivers;
-  const confidence = data.confidence != null ? data.confidence : {
-    score: data.confidenceScore,
-    level: data.confidenceLevel,
-    label: data.confidenceLabel,
-  };
-  const session = summarySessionLabel(data.session);
-  const sessionTitle = data.sessionBasis === 'regular_hours_without_holiday_calendar'
-    ? '交易阶段（常规时间）'
-    : '交易阶段';
-  const model = summaryText(data.model);
-  const timezone = data._meta && data._meta.timezone;
-  const generatedAt = shortAsOf(data.generatedAt, timezone);
-  const horizon = summaryObjectLabel(data.horizon);
-  const coreAsOf = shortAsOf(data.coreAsOf || data.coreDataAsOf, timezone);
-  const evidenceRange = summaryTimeRange(data, timezone);
-  const headlineEvidence = renderSummaryEvidenceRefs(data.headlineEvidenceRefs);
-  const breadthEvidence = renderSummaryEvidenceRefs(data.breadthEvidenceRefs);
-  const disclaimer = summaryText(data.disclaimer) || 'AI 自动生成，仅供参考，不构成投资建议。';
-  const meta = {
+function marketReviewMeta(data) {
+  return {
     ...(data._meta || {}),
-    asOf: data.coreAsOf || data.coreDataAsOf || data.dataAsOf || (data._meta && data._meta.asOf),
+    asOf: data.reviewDate || (data._meta && data._meta.asOf),
     fetchedAt: data.generatedAt || (data._meta && data._meta.fetchedAt),
   };
+}
 
-  $('#marketSummaryTitle').textContent = `✨ AI 大盘总结${marketLabel ? ` · ${marketLabel}` : ''}`;
-  setDataMeta($('#marketSummaryDataMeta'), meta);
-  const content = $('#marketSummaryContent');
-  content.dataset.hasSummary = 'true';
-  content.innerHTML = `
-    <div class="market-summary-lead">
-      <span class="market-summary-badges">
-        <span class="market-summary-stance ${summaryStanceClass(stance)}">${escapeHtml(stance)}</span>
-        ${renderSummaryConfidence(confidence)}
-      </span>
-      <span class="market-summary-headline-wrap">
-        <p class="market-summary-headline">${escapeHtml(headline)}</p>
-        ${headlineEvidence}
-      </span>
+function renderReviewMetrics(metrics) {
+  const values = Array.isArray(metrics)
+    ? metrics.filter((item) => item && typeof item === 'object').slice(0, 4)
+    : [];
+  if (!values.length) return '';
+  return `<div class="market-review-metrics">${values.map((item) => {
+    const tone = ['positive', 'negative'].includes(summaryText(item.tone).toLowerCase())
+      ? summaryText(item.tone).toLowerCase()
+      : 'neutral';
+    return `<div class="market-review-metric ${tone}">
+      <span class="market-review-metric-label">${escapeHtml(summaryText(item.label) || '指标')}</span>
+      <strong>${escapeHtml(summaryText(item.value) || '--')}</strong>
+      ${summaryText(item.detail) ? `<span class="market-review-metric-detail">${escapeHtml(summaryText(item.detail))}</span>` : ''}
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function citationsById(citations) {
+  const map = new Map();
+  (Array.isArray(citations) ? citations : []).forEach((citation, index) => {
+    if (!citation || typeof citation !== 'object') return;
+    const id = summaryText(citation.id) || String(index + 1);
+    map.set(id, citation);
+  });
+  return map;
+}
+
+function renderReviewCitations(citations, timezone) {
+  const values = (Array.isArray(citations) ? citations : [])
+    .filter((citation) => citation && typeof citation === 'object');
+  if (!values.length) return '';
+  return `<section class="market-review-citations" aria-labelledby="marketReviewCitationsTitle">
+    <h3 id="marketReviewCitationsTitle">资料与来源</h3>
+    <ol>${values.map((citation) => {
+      const title = summaryText(citation.title) || summaryText(citation.source) || '未命名来源';
+      const source = summaryText(citation.source);
+      const publishedAt = shortAsOf(citation.publishedAt, timezone);
+      const url = safeHttpUrl(citation.url);
+      const titleHtml = url === '#'
+        ? `<span class="market-review-citation-title">${escapeHtml(title)}</span>`
+        : `<a class="market-review-citation-title" href="${url}" target="_blank" rel="noopener noreferrer">${escapeHtml(title)}</a>`;
+      return `<li>${titleHtml}${source || publishedAt
+        ? `<span class="market-review-citation-meta">${[source, publishedAt].filter(Boolean).map(escapeHtml).join(' · ')}</span>`
+        : ''}</li>`;
+    }).join('')}</ol>
+  </section>`;
+}
+
+function renderMarketReviewDetail(data) {
+  const card = data.card && typeof data.card === 'object' ? data.card : {};
+  const detail = data.detail && typeof data.detail === 'object' ? data.detail : {};
+  const marketLabel = summaryText(data.marketLabel) || MARKET_LABELS[data.market] || '';
+  const stance = summaryText(card.stance) || '中性';
+  const executiveSummary = summaryText(detail.executiveSummary)
+    || summaryText(card.summary)
+    || summaryText(card.headline)
+    || '本次复盘暂无执行摘要。';
+  const executiveEvidence = detail.evidenceRefs && detail.evidenceRefs.executiveSummary;
+  const citations = Array.isArray(data.citations) ? data.citations : [];
+  const citationMap = citationsById(citations);
+  const sections = (Array.isArray(detail.sections) ? detail.sections : [])
+    .filter((section) => section && typeof section === 'object');
+  const timezone = data._meta && data._meta.timezone;
+  const generatedAt = shortAsOf(data.generatedAt, timezone);
+  const model = summaryText(data.model);
+  const disclaimer = summaryText(data.disclaimer) || 'AI 自动生成，仅供参考，不构成投资建议。';
+
+  $('#marketReviewDialogTitle').textContent = `${marketLabel ? `${marketLabel} · ` : ''}${summaryText(data.reviewDate) || '最近交易日'}盘后复盘`;
+  setDataMeta($('#marketReviewDialogMeta'), marketReviewMeta(data));
+  $('#marketReviewDialogContent').innerHTML = `
+    <div class="market-review-detail-lead">
+      <span class="market-summary-stance ${summaryStanceClass(stance)}">${escapeHtml(stance)}</span>
+      ${renderSummaryConfidence(data.confidence)}
     </div>
-    ${renderSummaryWarnings(data.dataWarnings)}
-    <div class="market-summary-grid">
-      <section class="market-summary-block"><h3>${breadthTitle}</h3><p>${escapeHtml(breadth)}</p>${breadthEvidence}</section>
-      <section class="market-summary-block"><h3>市场信号</h3>${renderSummaryItems(signals, '暂无明确市场信号。')}</section>
-      <section class="market-summary-block"><h3>风险提示</h3>${renderSummaryItems(data.risks, '当前证据不足以识别新增市场风险。')}</section>
-      <section class="market-summary-block"><h3>接下来关注</h3>${renderSummaryItems(data.watchPoints, '暂无额外关注点。')}</section>
+    <section class="market-review-executive">
+      <h3>执行摘要</h3>
+      <p>${escapeHtml(executiveSummary)}</p>
+      ${renderSummaryEvidenceRefs(executiveEvidence)}
+    </section>
+    ${renderSummaryWarnings(data.dataWarnings, citationMap)}
+    <div class="market-review-sections">${sections.length
+      ? sections.map((section) => `<section class="market-review-section">
+          <h3>${escapeHtml(summaryText(section.title) || summaryText(section.key) || '复盘要点')}</h3>
+          ${renderSummaryItems(section.items, '本节暂无可用信息。', citationMap)}
+        </section>`).join('')
+      : '<p class="market-summary-empty">暂无更多分项复盘内容。</p>'}
     </div>
-    <div class="market-summary-foot">
-      ${session ? `<span>${sessionTitle}：${escapeHtml(session)}</span>` : ''}
-      ${horizon ? `<span>周期：${escapeHtml(horizon)}</span>` : ''}
-      ${coreAsOf ? `<span>核心截至：${escapeHtml(coreAsOf)}</span>` : ''}
-      ${evidenceRange ? `<span>证据区间：${escapeHtml(evidenceRange)}</span>` : ''}
+    ${renderReviewCitations(citations, timezone)}
+    <div class="market-summary-foot market-review-detail-foot">
       ${generatedAt ? `<span>生成：${escapeHtml(generatedAt)}</span>` : ''}
       ${model ? `<span>模型：${escapeHtml(model)}</span>` : ''}
       <span class="market-summary-disclaimer">${escapeHtml(disclaimer)}</span>
     </div>`;
 }
 
-async function loadMarketSummary({ force = false } = {}) {
+function openMarketReview() {
+  if (!activeMarketReview || activeMarketReview.available !== true) return;
+  const dialog = $('#marketReviewDialog');
+  renderMarketReviewDetail(activeMarketReview);
+  marketReviewReturnFocus = document.activeElement;
+  if (!dialog.open) dialog.showModal();
+  requestAnimationFrame(() => $('#marketReviewDialogClose').focus({ preventScroll: true }));
+}
+
+function restoreMarketReviewFocus() {
+  const target = marketReviewReturnFocus;
+  marketReviewReturnFocus = null;
+  if (target && target.isConnected && target.offsetParent !== null) target.focus({ preventScroll: true });
+}
+
+function closeMarketReview({ restoreFocus = true } = {}) {
+  const dialog = $('#marketReviewDialog');
+  if (!restoreFocus) marketReviewReturnFocus = null;
+  if (dialog.open) dialog.close();
+  else if (restoreFocus) restoreMarketReviewFocus();
+}
+
+function renderMarketSummary(data) {
+  const card = data.card && typeof data.card === 'object' ? data.card : {};
+  const marketLabel = summaryText(data.marketLabel) || MARKET_LABELS[data.market] || MARKET_LABELS[state.market] || '';
+  const reviewDate = summaryText(data.reviewDate) || '最近交易日';
+  const stance = summaryText(card.stance) || '中性';
+  const headline = summaryText(card.headline) || '本次盘后复盘暂无标题。';
+  const summary = summaryText(card.summary);
+  const prominentRefs = card.evidenceRefs && typeof card.evidenceRefs === 'object'
+    ? [...new Set([
+        ...(Array.isArray(card.evidenceRefs.headline) ? card.evidenceRefs.headline : []),
+        ...(Array.isArray(card.evidenceRefs.summary) ? card.evidenceRefs.summary : []),
+      ])]
+    : [];
+  const themes = Array.isArray(card.themes)
+    ? card.themes.map(summaryText).filter(Boolean).slice(0, 5)
+    : [];
+  const keyRisk = summaryText(card.keyRisk);
+  const generatedAt = shortAsOf(data.generatedAt, data._meta && data._meta.timezone);
+  const warnings = normalizeSummaryItems(data.dataWarnings);
+  const nextReviewStatus = summaryText(data.nextReviewStatus).toLowerCase();
+  const status = summaryText(data.status).toLowerCase();
+  marketReviewNeedsPolling = status === 'retry_pending'
+    || nextReviewStatus === 'scheduled'
+    || nextReviewStatus === 'retry_pending';
+
+  activeMarketReview = data;
+  $('#marketSummaryTitle').textContent = `✨ AI 盘后复盘${marketLabel ? ` · ${marketLabel}` : ''}`;
+  setDataMeta($('#marketSummaryDataMeta'), marketReviewMeta(data));
+  const content = $('#marketSummaryContent');
+  content.dataset.hasReview = 'true';
+  content.innerHTML = `
+    <article class="market-review-preview">
+      <div class="market-review-kicker">
+        <span>${escapeHtml(reviewDate)} 收盘复盘</span>
+        ${generatedAt ? `<span>生成于 ${escapeHtml(generatedAt)}</span>` : ''}
+      </div>
+      <div class="market-review-lead">
+        <span class="market-review-badges">
+          <span class="market-summary-stance ${summaryStanceClass(stance)}">${escapeHtml(stance)}</span>
+          ${renderSummaryConfidence(data.confidence)}
+        </span>
+        <div class="market-review-copy">
+          <h3>${escapeHtml(headline)}</h3>
+          ${summary ? `<p>${escapeHtml(summary)}</p>` : ''}
+          ${renderSummaryEvidenceRefs(prominentRefs)}
+        </div>
+      </div>
+      ${renderReviewMetrics(card.metrics)}
+      ${themes.length ? `<div class="market-review-themes" aria-label="复盘主题">${themes
+        .map((theme) => `<span>${escapeHtml(theme)}</span>`).join('')}</div>` : ''}
+      ${keyRisk ? `<div class="market-review-risk"><strong>关键风险</strong><span>${escapeHtml(keyRisk)}</span>${renderSummaryEvidenceRefs(card.evidenceRefs && card.evidenceRefs.keyRisk)}</div>` : ''}
+      ${nextReviewStatus === 'unconfigured' ? `<div class="market-review-config-alert">
+        <span>当前模型未配置；这份历史复盘仍可查看，后续每日复盘已暂停。</span>
+        <button type="button" class="market-summary-config" data-summary-config>模型设置</button>
+      </div>` : ''}
+      <button type="button" class="market-review-open" data-review-open aria-haspopup="dialog" aria-controls="marketReviewDialog">
+        查看完整复盘 <span aria-hidden="true">→</span>
+      </button>
+    </article>`;
+
+  if (status === 'retry_pending') {
+    setSummaryNotice(summaryText(data.message) || '最新复盘正在等待重试，当前展示最近一份已完成内容。');
+  } else if (data._meta && data._meta.stale) {
+    setSummaryNotice('⚠ 当前展示缓存复盘，请留意复盘日期和数据截止时间。');
+  } else if (warnings.length) {
+    setSummaryNotice(`本次复盘有 ${warnings.length} 条数据提示，详情中可查看。`);
+  } else {
+    setSummaryNotice('');
+  }
+  if ($('#marketReviewDialog').open) renderMarketReviewDetail(data);
+}
+
+async function loadMarketReview() {
   const market = state.market;
   if (market !== 'cn' && market !== 'hk' && market !== 'us') return;
+  lastMarketReviewAt = Date.now();
   const req = ++summaryReq;
   const content = $('#marketSummaryContent');
-  const hadSummary = content.dataset.hasSummary === 'true';
-  $('#marketSummaryTitle').textContent = `✨ AI 大盘总结 · ${MARKET_LABELS[market]}`;
+  const hadReview = content.dataset.hasReview === 'true'
+    && activeMarketReview
+    && summaryText(activeMarketReview.market).toLowerCase() === market;
+  $('#marketSummaryTitle').textContent = `✨ AI 盘后复盘 · ${MARKET_LABELS[market]}`;
   setSummaryNotice('');
   setSummaryBusy(true);
-  if (!force || !hadSummary) renderSummaryLoading(market);
+  if (!hadReview) {
+    activeMarketReview = null;
+    renderSummaryLoading(market);
+  }
 
   try {
-    const path = `/api/market-summary?market=${encodeURIComponent(market)}`;
-    const data = await api(path, force
-      ? {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ market }),
-        }
-      : undefined);
+    const data = await api(`/api/market-review?market=${encodeURIComponent(market)}`);
     if (req !== summaryReq || market !== state.market) return;
-    if (!data || typeof data !== 'object') throw new Error('market summary response is invalid');
-    if (data.configured === false) {
-      setDataMeta($('#marketSummaryDataMeta'), data._meta);
-      renderSummaryUnconfigured(data);
-      return;
-    }
+    if (!data || typeof data !== 'object') throw new Error('market review response is invalid');
     const responseMarket = summaryText(data.market).toLowerCase();
-    if (responseMarket && responseMarket !== market) throw new Error('market summary response market mismatch');
-    renderMarketSummary(data);
-    if (data._meta && data._meta.stale) {
-      setSummaryNotice('⚠ 当前展示缓存总结；最新数据刷新失败，请留意截止时间。');
+    if (responseMarket && responseMarket !== market) throw new Error('market review response market mismatch');
+    if (data.available === true) {
+      if (!data.card || typeof data.card !== 'object') throw new Error('market review card is missing');
+      renderMarketSummary(data);
+    } else {
+      activeMarketReview = null;
+      setDataMeta($('#marketSummaryDataMeta'), data._meta);
+      renderReviewUnavailable(data);
     }
   } catch (error) {
     if (req !== summaryReq || market !== state.market) return;
-    console.error('market summary error', error);
-    if (hadSummary) setSummaryNotice('重新分析失败，仍保留上一次总结。', 'error');
+    console.error('market review error', error);
+    marketReviewNeedsPolling = true;
+    if (hadReview) setSummaryNotice('复盘检查失败，仍保留上一次内容。', 'error');
     else {
-      setSummaryNotice('AI 总结加载失败，请稍后重试。', 'error');
+      activeMarketReview = null;
+      setSummaryNotice('AI 盘后复盘加载失败，请稍后重试。', 'error');
       setDataMeta($('#marketSummaryDataMeta'), null);
       renderSummaryError();
     }
@@ -1456,31 +1691,33 @@ async function loadMarketSummary({ force = false } = {}) {
 
 /* ---------- 市场切换 ---------- */
 async function switchMarket(market) {
-  summaryReq++; // 使上一市场或同市场的旧总结请求立即失效
+  summaryReq++; // 使上一市场或同市场的旧复盘请求立即失效
+  closeMarketReview({ restoreFocus: false });
+  activeMarketReview = null;
+  marketReviewNeedsPolling = false;
   state.market = market;
   state.activeCode = null;
   document.querySelectorAll('#marketTabs .tab').forEach((b) =>
     b.classList.toggle('active', b.dataset.market === market)
   );
   const isQuote = market === 'cn' || market === 'hk' || market === 'us';
-  $('#indexSection').style.display = isQuote ? '' : 'none';
+  $('#indexSection').style.display = isQuote ? 'block' : 'none';
   $('#marketSummarySection').style.display = isQuote ? 'block' : 'none';
-  $('#chartSection').style.display = isQuote ? '' : 'none';
-  // 市场概况仅A股/美股有数据源
-  $('#overviewSection').style.display = market === 'cn' || market === 'us' ? '' : 'none';
-  $('#rankSection').style.display = isQuote ? '' : 'none';
+  $('#chartSection').style.display = isQuote ? 'block' : 'none';
+  $('#overviewSection').style.display = isQuote ? 'block' : 'none';
+  $('#rankSection').style.display = isQuote ? 'block' : 'none';
   $('#watchSection').style.display = market === 'watch' ? 'block' : 'none';
   $('#chatSection').style.display = market === 'llm' ? 'block' : 'none';
-  $('#newsSection').style.display = market === 'llm' ? 'none' : '';
+  $('#newsSection').style.display = market === 'llm' ? 'none' : 'block';
   // 行业板块仅A股有数据
-  $('#sectorSection').style.display = market === 'cn' ? '' : 'none';
+  $('#sectorSection').style.display = market === 'cn' ? 'block' : 'none';
   state.chartType = 'minute';
   document.querySelectorAll('#chartSwitch .switch-btn').forEach((b) =>
     b.classList.toggle('active', b.dataset.type === state.chartType)
   );
-  // 总结请求可能仍在生成；切换任何 tab 都立即清空并恢复交互状态。
+  // 复盘请求可能仍在进行；切换任何 tab 都立即清空，防止残留上一市场内容。
   $('#marketSummaryContent').innerHTML = '';
-  $('#marketSummaryContent').dataset.hasSummary = 'false';
+  $('#marketSummaryContent').dataset.hasReview = 'false';
   setSummaryBusy(false);
   setSummaryNotice('');
   setDataMeta($('#marketSummaryDataMeta'), null);
@@ -1520,7 +1757,7 @@ async function refreshQuotes() {
 
 function refreshAll() {
   refreshQuotes();
-  loadMarketSummary(); // 首次加载和切换市场时生成；不跟随 30 秒行情轮询
+  loadMarketReview(); // 仅读取服务端每日复盘；不跟随 30 秒行情轮询
   loadNews().catch(console.error);
 }
 
@@ -1931,7 +2168,7 @@ async function openLLMConfig() {
   } catch (e) {
     fillLLMProvider('deepseek');
   }
-  $('#llmModal').style.display = '';
+  $('#llmModal').style.display = 'flex';
 }
 
 async function saveLLMConfig() {
@@ -1964,9 +2201,19 @@ document.querySelectorAll('#chartSwitch .switch-btn').forEach((b) =>
 document.querySelectorAll('#sectorSwitch .switch-btn').forEach((b) =>
   b.addEventListener('click', () => setSectorView(b.dataset.view))
 );
-$('#marketSummaryRefresh').addEventListener('click', () => loadMarketSummary({ force: true }));
 $('#marketSummaryContent').addEventListener('click', (e) => {
   if (e.target.closest('[data-summary-config]')) openLLMConfig().catch(console.error);
+  if (e.target.closest('[data-review-open]')) openMarketReview();
+});
+$('#marketReviewDialogClose').addEventListener('click', () => closeMarketReview());
+$('#marketReviewDialog').addEventListener('close', restoreMarketReviewFocus);
+$('#marketReviewDialog').addEventListener('click', (e) => {
+  const dialog = $('#marketReviewDialog');
+  if (e.target !== dialog) return;
+  const rect = dialog.getBoundingClientRect();
+  const outside = e.clientX < rect.left || e.clientX > rect.right
+    || e.clientY < rect.top || e.clientY > rect.bottom;
+  if (outside) closeMarketReview();
 });
 document.querySelectorAll('#mChartSwitch .switch-btn').forEach((b) =>
   b.addEventListener('click', () => setModalChartType(b.dataset.type))
@@ -2053,7 +2300,7 @@ $('#llmSave').addEventListener('click', async () => {
     const j = await saveLLMConfig();
     setLLMStatus(j.configured ? '✓ 已保存，立即生效' : '已保存，但还没有 API Key', j.configured);
     if (j.configured && ['cn', 'hk', 'us'].includes(state.market)) {
-      loadMarketSummary({ force: true });
+      loadMarketReview();
     }
   } catch (e) { setLLMStatus(e.message, false); }
 });
@@ -2066,7 +2313,7 @@ $('#llmTest').addEventListener('click', async () => {
     const r = await fetch('/api/llm-config/test', { method: 'POST' }).then((x) => x.json());
     setLLMStatus(r.ok ? `✓ ${r.message}` : `✗ ${r.message}`, r.ok);
     if (r.ok && ['cn', 'hk', 'us'].includes(state.market)) {
-      loadMarketSummary({ force: true });
+      loadMarketReview();
     }
   } catch (e) { setLLMStatus(e.message, false); }
   btn.disabled = false;
@@ -2083,3 +2330,11 @@ setInterval(() => {
   if (Date.now() - lastQuotesAt >= (open ? 30000 : 300000)) refreshQuotes();
 }, 5000);
 setInterval(() => loadNews().catch(console.error), 300000); // 新闻 5 分钟刷新
+// 对“等待收盘/等待重试”状态低频轮询；成功复盘仍由服务端保证每市场每交易日只生成一次。
+setInterval(() => {
+  if (marketReviewNeedsPolling
+    && ['cn', 'hk', 'us'].includes(state.market)
+    && Date.now() - lastMarketReviewAt >= 300000) {
+    loadMarketReview();
+  }
+}, 30000);

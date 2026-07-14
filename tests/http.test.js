@@ -288,3 +288,46 @@ test('AI 大盘总结路由规范化市场，并区分 GET 缓存读取与 POST 
   assert.equal(method.status, 405);
   assert.equal(calls.length, 2);
 });
+
+test('AI 盘后复盘路由只允许 GET，并让旧总结地址兼容读取同一份持久化复盘', async () => {
+  const calls = [];
+  const handler = createHttpHandler({
+    port: 3888,
+    auth: createAuth(),
+    staticServer: { resolvePath: () => null },
+    marketService: {},
+    marketReviewService: {
+      async ensureReview(market) {
+        calls.push(market);
+        return {
+          data: { available: true, status: 'ready', market, reviewDate: '2026-07-14' },
+          fetchedAt: 1000, stale: false, staleSince: null,
+        };
+      },
+    },
+    chatService: {}, llmConfigStore: {}, llmClient: {}, watchlistStore: {}, chatStore: {},
+    marketMeta: (entry, spec) => ({ market: spec.market, currency: spec.currency, stale: false }),
+    sanitizeCode: (value) => value,
+    marketForCode: () => 'cn',
+    env: {}, logger: { error() {} },
+  });
+
+  const review = mockResponse();
+  await handler(mockRequest({ url: '/api/market-review?market=hk' }), review);
+  assert.equal(review.status, 200);
+  assert.equal(JSON.parse(review.body).data.market, 'hk');
+
+  const alias = mockResponse();
+  await handler(mockRequest({ url: '/api/market-summary?market=us' }), alias);
+  assert.equal(alias.status, 200);
+  assert.equal(JSON.parse(alias.body).data.status, 'ready');
+
+  const post = mockResponse();
+  await handler(mockRequest({ url: '/api/market-review', method: 'POST' }), post);
+  assert.equal(post.status, 405);
+
+  const aliasPost = mockResponse();
+  await handler(mockRequest({ url: '/api/market-summary', method: 'POST' }), aliasPost);
+  assert.equal(aliasPost.status, 405);
+  assert.deepEqual(calls, ['hk', 'us']);
+});

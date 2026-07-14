@@ -31,7 +31,6 @@ const {
   fmtTimeInTZ,
   dateInTimezone,
   isMarketOpen,
-  marketSession,
 } = require('./core/time');
 const researchDomain = require('./domain/research-card');
 
@@ -62,9 +61,10 @@ const { createJsonFileStorage } = require('./storage/json-file');
 const { createWatchlistStore } = require('./storage/watchlist-store');
 const { createLLMConfigStore } = require('./storage/llm-config-store');
 const { createChatStore } = require('./storage/chat-store');
+const { createMarketReviewStore } = require('./storage/market-review-store');
 
 const { createLLMClient } = require('./ai/llm-client');
-const { createMarketSummaryService } = require('./ai/market-summary-service');
+const { createMarketReviewService } = require('./ai/market-review-service');
 const { LLM_TOOLS, serializeToolResult, createToolRunner } = require('./ai/tools');
 const prompts = require('./ai/prompts');
 const {
@@ -99,7 +99,7 @@ function createApplication({
   if (!runtime || !runtime.cache || !runtime.yahooScheduler) {
     throw new TypeError('runtime must provide cache and yahooScheduler');
   }
-  const { cache, cached, cachedEntry, expireCached } = runtime.cache;
+  const { cache, cached, cachedEntry } = runtime.cache;
   const port = env.PORT || 3888;
   const projectDir = path.join(__dirname, '..');
   const publicDir = path.join(projectDir, 'public');
@@ -154,6 +154,7 @@ function createApplication({
     getRankHK: marketData.getRankHK,
     getRankUS: marketData.getRankUS,
     getOverviewCN: marketData.getOverviewCN,
+    getOverviewHK: marketData.getOverviewHK,
     getOverviewUS: marketData.getOverviewUS,
     getQuote: marketData.getQuote,
     getQuotes: marketData.getQuotes,
@@ -190,18 +191,22 @@ function createApplication({
     isCNCode,
     isKnownHKCode,
   });
+  const marketReviewStore = createMarketReviewStore({
+    dataDir,
+    fs,
+    jsonFile,
+  });
 
   const llmClient = createLLMClient({ fetchImpl });
-  const marketSummaryService = createMarketSummaryService({
-    cachedEntry,
-    expireCached,
+  const marketReviewService = createMarketReviewService({
     marketService,
+    marketReviewStore,
     llmConfigStore,
     llmClient,
     marketMeta,
     annotateMarketData,
-    marketSession,
-    marketSummarySystemPrompt: prompts.marketSummarySystemPrompt,
+    marketReviewSystemPrompt: prompts.marketReviewSystemPrompt,
+    logger,
   });
   const toolRunner = createToolRunner({
     marketService,
@@ -239,7 +244,7 @@ function createApplication({
     auth,
     staticServer,
     marketService,
-    marketSummaryService,
+    marketReviewService,
     chatService,
     llmConfigStore,
     llmClient,
@@ -258,17 +263,35 @@ function createApplication({
     logger,
   });
   let warmTimer = null;
+  let reviewTimer = null;
+  const reviewOnce = () => marketReviewService.ensureDueReviews()
+    .catch((error) => logger.error(`[market-review] scheduler: ${error.message}`));
 
-  function startServer() {
-    chatStore.migrateChatSessionIds();
+  function startTimers() {
     if (env.MARKET_DISABLE_WARM !== '1' && !warmTimer) {
       warmTimer = setInterval(cacheWarmer.warmOnce, CACHE_WARM_INTERVAL_MS);
     }
+    if (env.MARKET_DISABLE_REVIEW !== '1' && !reviewTimer) {
+      reviewTimer = setInterval(reviewOnce, 5 * 60 * 1000);
+    }
+  }
+
+  function startServer() {
+    chatStore.migrateChatSessionIds();
     return server.listen(port, () => {
+      startTimers();
       logger.log(`行情看板已启动: http://localhost:${port}`);
       if (env.MARKET_DISABLE_WARM !== '1') cacheWarmer.warmOnce();
+      if (env.MARKET_DISABLE_REVIEW !== '1') reviewOnce();
     });
   }
+
+  server.on('close', () => {
+    if (warmTimer) clearInterval(warmTimer);
+    if (reviewTimer) clearInterval(reviewTimer);
+    warmTimer = null;
+    reviewTimer = null;
+  });
 
   const parseYahooKline = (result) => parseYahooKlineWithDeps(result, { annotateMarketData });
 
@@ -283,10 +306,11 @@ function createApplication({
     cachedEntry,
     marketData,
     marketService,
-    marketSummaryService,
+    marketReviewService,
+    marketSummaryService: marketReviewService,
     stockEventsService,
     chatService,
-    stores: { watchlistStore, llmConfigStore, chatStore },
+    stores: { watchlistStore, llmConfigStore, chatStore, marketReviewStore },
     compatibility: {
       ...researchDomain,
       hasStockResearchIntent,

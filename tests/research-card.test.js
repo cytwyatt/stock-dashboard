@@ -1,6 +1,7 @@
 'use strict';
 
 process.env.MARKET_DISABLE_WARM = '1';
+process.env.MARKET_DISABLE_REVIEW = '1';
 process.env.MARKET_DATA_DIR = process.env.MARKET_DATA_DIR || '/tmp/market-research-test-data';
 
 const test = require('node:test');
