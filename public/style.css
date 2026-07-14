@@ -772,6 +772,7 @@ a.market-review-citation-title { text-decoration: underline; text-underline-offs
 }
 .llm-form input:focus, .llm-form select:focus { border-color: var(--accent); }
 .llm-hint { font-size: 11px; color: var(--text-dim); margin-top: 4px; line-height: 1.6; }
+.llm-field-hint { font-size: 11px; color: var(--text-dim); line-height: 1.5; }
 .llm-btns { display: flex; gap: 8px; margin-top: 12px; }
 .llm-btn {
   flex: 1;
@@ -999,6 +1000,8 @@ a.market-review-citation-title { text-decoration: underline; text-underline-offs
 
 /* ---------- 移动端 ---------- */
 @media (max-width: 768px) {
+  .llm-form input,
+  .llm-form select { font-size: 16px; }
   .container { padding: 10px 10px 24px; }
   .topbar-inner { padding: 8px 12px; gap: 8px; flex-wrap: wrap; }
   .search-box { flex: 1 1 100%; order: 10; }

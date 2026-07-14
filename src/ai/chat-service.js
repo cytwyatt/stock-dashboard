@@ -1,6 +1,11 @@
 'use strict';
 
+const { isOfficialDeepSeekV4 } = require('./llm-client');
+
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+const MAX_TOOL_ROUNDS = 6;
+const ADAPTIVE_TOOL_EVIDENCE_LIMIT = 16000;
+const ADAPTIVE_THINKING_TIMEOUT_MS = 300000;
 
 class ChatValidationError extends Error {
   constructor(message) {
@@ -19,6 +24,7 @@ function createChatService({
   LLM_TOOLS,
   automaticEvidence,
   automaticResearch,
+  adaptiveThinkingIntent,
   prompts,
   serializeToolResult,
   logger = console,
@@ -28,8 +34,11 @@ function createChatService({
     throw new TypeError('chatStore, llmConfigStore, llmClient, toolRunner and prompts are required');
   }
   if (typeof automaticEvidence !== 'function' || typeof automaticResearch !== 'function'
-      || typeof serializeToolResult !== 'function') {
-    throw new TypeError('automaticEvidence, automaticResearch and serializeToolResult are required');
+      || typeof adaptiveThinkingIntent !== 'function' || typeof serializeToolResult !== 'function') {
+    throw new TypeError('automaticEvidence, automaticResearch, adaptiveThinkingIntent and serializeToolResult are required');
+  }
+  if (typeof prompts.adaptiveThinkingSystemMessage !== 'function') {
+    throw new TypeError('prompts.adaptiveThinkingSystemMessage is required');
   }
 
   // HTTP 删除会话也必须复用这个锁，避免与同会话的 LLM 回写互相覆盖。
@@ -96,6 +105,9 @@ function createChatService({
         const stockContext = chatStore.normalizeStockContext(session.stockContext);
         if (stockContext) session.stockContext = stockContext;
         else delete session.stockContext;
+        const officialDeepSeekV4 = isOfficialDeepSeekV4(config);
+        const useAdaptiveThinking = officialDeepSeekV4 && !!stockContext
+          && adaptiveThinkingIntent(text, stockContext);
         if (!session.title) session.title = text.slice(0, 24);
         session.messages.push({ role: 'user', content: text });
         session.updatedAt = now();
@@ -118,7 +130,7 @@ function createChatService({
         const evidence = evidenceResult.status === 'fulfilled' ? evidenceResult.value : null;
         const research = researchResult.status === 'fulfilled' ? researchResult.value : null;
 
-        const messages = [
+        const systemMessages = [
           { role: 'system', content: prompts.llmSystemPrompt() },
           ...(stockContext ? [{ role: 'system', content: prompts.stockContextSystemMessage(stockContext) }] : []),
           ...(research ? [{ role: 'system', content: prompts.stockResearchSystemMessage(research) }] : []),
@@ -126,12 +138,20 @@ function createChatService({
             role: 'system',
             content: prompts.stockEvidenceSystemMessage(evidence, serializeToolResult),
           }] : []),
-          ...session.messages.slice(-12).map((message) => ({ role: message.role, content: message.content })),
         ];
+        const conversationMessages = session.messages.slice(-12)
+          .map((message) => ({ role: message.role, content: message.content }));
+        const messages = [...systemMessages, ...conversationMessages];
+        const toolEvidence = [];
 
         let answer = '';
-        for (let round = 0; round < 6; round++) {
-          const response = await llmClient.complete(config, messages, LLM_TOOLS);
+        for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+          const response = await llmClient.complete(
+            config,
+            messages,
+            LLM_TOOLS,
+            officialDeepSeekV4 ? { thinking: 'disabled' } : {},
+          );
           if (response.tool_calls && response.tool_calls.length) {
             messages.push(response);
             for (const call of response.tool_calls) {
@@ -145,10 +165,16 @@ function createChatService({
               } catch (error) {
                 result = { error: error.message };
               }
+              const serializedResult = serializeToolResult(result);
               messages.push({
                 role: 'tool',
                 tool_call_id: call.id,
-                content: serializeToolResult(result),
+                content: serializedResult,
+              });
+              toolEvidence.push({
+                name: call.function.name,
+                args,
+                result: serializedResult,
               });
             }
             continue;
@@ -157,6 +183,42 @@ function createChatService({
           break;
         }
         if (!answer) answer = '（分析轮次超限，请换个更具体的问题）';
+
+        if (useAdaptiveThinking) {
+          try {
+            const adaptiveMessages = [
+              ...systemMessages,
+              {
+                role: 'system',
+                content: prompts.adaptiveThinkingSystemMessage(
+                  serializeToolResult(toolEvidence, ADAPTIVE_TOOL_EVIDENCE_LIMIT),
+                ),
+              },
+              ...conversationMessages,
+            ];
+            const deepResponse = await llmClient.complete(config, adaptiveMessages, null, {
+              thinking: 'enabled',
+              reasoningEffort: 'high',
+              omitTemperature: true,
+              timeoutMs: ADAPTIVE_THINKING_TIMEOUT_MS,
+              includeMeta: true,
+            });
+            const finishReason = deepResponse?._completionMeta?.finishReason;
+            const deepAnswer = typeof deepResponse?.content === 'string'
+              ? deepResponse.content.trim()
+              : '';
+            if (finishReason !== 'stop') {
+              throw new Error(`异常结束：${finishReason || 'unknown'}`);
+            }
+            if (Array.isArray(deepResponse.tool_calls) && deepResponse.tool_calls.length) {
+              throw new Error('最终综合意外返回工具调用');
+            }
+            if (!deepAnswer) throw new Error('最终综合返回空内容');
+            answer = deepAnswer;
+          } catch (error) {
+            logger.error('[adaptive-thinking]', `${error.message}，已回退普通答案`);
+          }
+        }
 
         session.messages.push({ role: 'assistant', content: answer });
         session.updatedAt = now();

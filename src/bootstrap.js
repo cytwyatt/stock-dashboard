@@ -232,6 +232,7 @@ function createApplication({
     LLM_TOOLS,
     automaticEvidence: evidenceBuilder.buildAutomaticStockEvidence,
     automaticResearch: evidenceBuilder.buildAutomaticStockResearch,
+    adaptiveThinkingIntent: hasStockResearchIntent,
     prompts,
     serializeToolResult,
     logger,
