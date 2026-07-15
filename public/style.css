@@ -665,8 +665,8 @@ a.market-review-citation-title { text-decoration: underline; text-underline-offs
   padding: 6px 10px;
 }
 .chat-msgs { flex: 1; overflow-y: auto; padding: 4px 2px; }
-.chat-msg { margin-bottom: 12px; display: flex; }
-.chat-msg.user { justify-content: flex-end; }
+.chat-msg { margin-bottom: 12px; display: flex; flex-direction: column; align-items: flex-start; }
+.chat-msg.user { align-items: flex-end; }
 .chat-bubble {
   max-width: 85%;
   border-radius: 12px;
@@ -677,6 +677,14 @@ a.market-review-citation-title { text-decoration: underline; text-underline-offs
 }
 .chat-msg.user .chat-bubble { background: var(--accent); color: #fff; }
 .chat-msg.assistant .chat-bubble { background: var(--bg); border: 1px solid var(--border); }
+.chat-msg-time {
+  margin-top: 3px;
+  padding: 0 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+}
 .chat-bubble p { margin: 0 0 8px; }
 .chat-bubble p:last-child { margin-bottom: 0; }
 .chat-bubble ul { margin: 0 0 8px 18px; }

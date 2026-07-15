@@ -1897,11 +1897,46 @@ function mdToHtml(src) {
   return h.replace(/\x01pre([A-Za-z0-9+/=]*)\x01/g, (_, b) => `<pre>${decodeURIComponent(escape(atob(b)))}</pre>`);
 }
 
-function appendChatMsg(role, html) {
+function formatChatTimestamp(value, referenceTime = Date.now()) {
+  if (!Number.isSafeInteger(value) || value < 0) return null;
+  const date = new Date(value);
+  const reference = new Date(referenceTime);
+  if (!Number.isFinite(date.getTime()) || !Number.isFinite(reference.getTime())) return null;
+  const pad = (part) => String(part).padStart(2, '0');
+  const time = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  const sameYear = date.getFullYear() === reference.getFullYear();
+  const sameDay = sameYear
+    && date.getMonth() === reference.getMonth()
+    && date.getDate() === reference.getDate();
+  const datePart = `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  return {
+    label: sameDay ? time : `${sameYear ? '' : `${date.getFullYear()}-`}${datePart} ${time}`,
+    dateTime: date.toISOString(),
+    title: `${date.getFullYear()}-${datePart} ${time}:${pad(date.getSeconds())}`,
+  };
+}
+
+function appendChatMsg(role, html, createdAt) {
   const wrap = $('#chatMsgs');
   const div = document.createElement('div');
   div.className = `chat-msg ${role}`;
   div.innerHTML = `<div class="chat-bubble">${html}</div>`;
+  const timestamp = formatChatTimestamp(createdAt);
+  if (timestamp) {
+    const time = document.createElement('time');
+    time.className = 'chat-msg-time';
+    time.dateTime = timestamp.dateTime;
+    time.title = timestamp.title;
+    time.setAttribute('aria-label', `发送时间 ${timestamp.title}`);
+    time.textContent = timestamp.label;
+    div.appendChild(time);
+  } else {
+    const legacy = document.createElement('span');
+    legacy.className = 'chat-msg-time';
+    legacy.title = '该消息保存时尚未记录发送时间';
+    legacy.textContent = '历史消息';
+    div.appendChild(legacy);
+  }
   wrap.appendChild(div);
   wrap.scrollTop = wrap.scrollHeight;
   return div;
@@ -1966,7 +2001,7 @@ async function selectChatSession(id) {
       return;
     }
     for (const m of d.messages) {
-      appendChatMsg(m.role, m.role === 'user' ? mdToHtml(m.content) : mdToHtml(m.content));
+      appendChatMsg(m.role, mdToHtml(m.content), m.createdAt);
     }
   } catch (e) { console.error(e); }
 }
@@ -2058,7 +2093,7 @@ async function sendChat() {
   if (session) session.count = Math.max(1, Number(session.count || 0));
   const empty = $('#chatMsgs .chat-empty');
   if (empty) empty.remove();
-  appendChatMsg('user', mdToHtml(text));
+  appendChatMsg('user', mdToHtml(text), Date.now());
   setChatStatus('思考中…');
 
   try {
@@ -2095,7 +2130,7 @@ async function sendChat() {
         } else if (ev.type === 'answer') {
           if (chat.activeId === sessionId) {
             setChatStatus(null);
-            if (chat.selectReq === viewReq) appendChatMsg('assistant', mdToHtml(ev.content));
+            if (chat.selectReq === viewReq) appendChatMsg('assistant', mdToHtml(ev.content), ev.createdAt);
             else await selectChatSession(sessionId); // 中途切走又切回时，从服务端重载，避免重复/漏消息
           }
           // 用服务端返回的标题同步侧边栏（首问后自动命名）
@@ -2106,7 +2141,7 @@ async function sendChat() {
         } else if (ev.type === 'error') {
           if (chat.activeId === sessionId) {
             setChatStatus(null);
-            appendChatMsg('assistant', `<p>⚠️ ${escapeHtml(ev.message)}</p>`);
+            appendChatMsg('assistant', `<p>⚠️ ${escapeHtml(ev.message)}</p>`, Date.now());
           }
         }
       }
@@ -2114,7 +2149,7 @@ async function sendChat() {
   } catch (e) {
     if (chat.activeId === sessionId) {
       setChatStatus(null);
-      appendChatMsg('assistant', `<p>⚠️ 请求失败：${escapeHtml(e.message)}</p>`);
+      appendChatMsg('assistant', `<p>⚠️ 请求失败：${escapeHtml(e.message)}</p>`, Date.now());
     }
   }
   if (chat.activeId === sessionId) setChatStatus(null);

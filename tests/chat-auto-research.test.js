@@ -73,6 +73,18 @@ function postChat(port, payload) {
   });
 }
 
+function getJSON(port, requestPath) {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ hostname: '127.0.0.1', port, path: requestPath }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { text += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, data: JSON.parse(text) }));
+    });
+    req.on('error', reject);
+  });
+}
+
 function parseSSE(text) {
   return text
     .split('\n\n')
@@ -221,7 +233,9 @@ test('个股研究意图只覆盖投研问题，并在首次模型请求前自�
     assert.ok(positiveEvents.some((event) =>
       event.type === 'tool' && event.name === 'get_research_card'
       && event.args.code === 'sh600519' && event.args.auto === true));
-    assert.ok(positiveEvents.some((event) => event.type === 'answer' && event.content === 'MOCK_DEEP'));
+    const positiveAnswer = positiveEvents.find((event) => event.type === 'answer');
+    assert.equal(positiveAnswer.content, 'MOCK_DEEP');
+    assert.equal(Number.isSafeInteger(positiveAnswer.createdAt), true);
     assert.equal(llmBodies.length, 2, '复杂投研应先取数，再做一次无工具深度综合');
     assert.deepEqual(llmBodies[0].thinking, { type: 'disabled' });
     assert.ok(Array.isArray(llmBodies[0].tools) && llmBodies[0].tools.length > 0);
@@ -241,6 +255,12 @@ test('个股研究意图只覆盖投研问题，并在首次模型请求前自�
     }
     assert.ok(researchMessage.length < 8000, `研究卡自动上下文过长：${researchMessage.length}`);
     assert.equal(klineRequests.filter((url) => url.includes('day,,,400,qfq')).length, 2);
+
+    const storedPositive = await getJSON(port, '/api/chat/sessions/research-positive');
+    assert.equal(storedPositive.status, 200);
+    assert.equal(storedPositive.data.messages.length, 2);
+    assert.equal(Number.isSafeInteger(storedPositive.data.messages[0].createdAt), true);
+    assert.equal(storedPositive.data.messages[1].createdAt, positiveAnswer.createdAt);
 
     cache.clear();
     const beforeNegativeKlines = klineRequests.length;

@@ -4,6 +4,11 @@ const path = require('node:path');
 
 const isValidChatSessionId = (id) => typeof id === 'string' && /^[\w-]{1,80}$/.test(id);
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+const MAX_CHAT_TIMESTAMP_MS = 8.64e15;
+
+function isValidChatTimestamp(value) {
+  return Number.isSafeInteger(value) && value >= 0 && value <= MAX_CHAT_TIMESTAMP_MS;
+}
 
 function createChatStore({
   dataDir,
@@ -85,6 +90,14 @@ function createChatStore({
       if (!Array.isArray(session.messages)) {
         session.messages = [];
         changed = true;
+      }
+      for (const message of session.messages) {
+        if (!message || typeof message !== 'object' || Array.isArray(message)
+            || !hasOwn(message, 'createdAt')) continue;
+        if (!isValidChatTimestamp(message.createdAt)) {
+          delete message.createdAt;
+          changed = true;
+        }
       }
       if (hasOwn(session, 'stockContext')) {
         const normalized = normalizeStockContext(session.stockContext);

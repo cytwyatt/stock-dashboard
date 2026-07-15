@@ -78,12 +78,24 @@ function createChatService({
     );
     const text = String(payload.message || '').trim().slice(0, 2000);
     if (!text) invalid('消息为空');
-    return { sessionId, text, hasIncomingStockContext, incomingStockContext };
+    return {
+      sessionId,
+      text,
+      hasIncomingStockContext,
+      incomingStockContext,
+      userCreatedAt: now(),
+    };
   }
 
   async function run(prepared, emit) {
     if (!prepared || typeof emit !== 'function') throw new TypeError('prepared and emit are required');
-    const { sessionId, text, hasIncomingStockContext, incomingStockContext } = prepared;
+    const {
+      sessionId,
+      text,
+      hasIncomingStockContext,
+      incomingStockContext,
+      userCreatedAt,
+    } = prepared;
     return withSessionLock(sessionId, async () => {
       const config = llmConfigStore.getLLMConfig();
       try {
@@ -98,7 +110,7 @@ function createChatService({
         const store = chatStore.readChats();
         let session = store.sessions.find((item) => item.id === sessionId);
         if (!session) {
-          session = { id: sessionId, title: '', createdAt: now(), messages: [] };
+          session = { id: sessionId, title: '', createdAt: userCreatedAt, messages: [] };
           store.sessions.unshift(session);
         }
         if (incomingStockContext) session.stockContext = incomingStockContext;
@@ -109,8 +121,8 @@ function createChatService({
         const useAdaptiveThinking = officialDeepSeekV4 && !!stockContext
           && adaptiveThinkingIntent(text, stockContext);
         if (!session.title) session.title = text.slice(0, 24);
-        session.messages.push({ role: 'user', content: text });
-        session.updatedAt = now();
+        session.messages.push({ role: 'user', content: text, createdAt: userCreatedAt });
+        session.updatedAt = userCreatedAt;
         chatStore.writeChats(store);
 
         const onAutomaticTool = (name, args) => emit({ type: 'tool', name, args });
@@ -220,15 +232,22 @@ function createChatService({
           }
         }
 
-        session.messages.push({ role: 'assistant', content: answer });
-        session.updatedAt = now();
+        const assistantCreatedAt = now();
+        session.messages.push({ role: 'assistant', content: answer, createdAt: assistantCreatedAt });
+        session.updatedAt = assistantCreatedAt;
         const latestStore = chatStore.readChats();
         const index = latestStore.sessions.findIndex((item) => item.id === session.id);
         if (index >= 0) latestStore.sessions[index] = session;
         else latestStore.sessions.unshift(session);
         chatStore.writeChats(latestStore);
 
-        emit({ type: 'answer', content: answer, sessionId: session.id, title: session.title });
+        emit({
+          type: 'answer',
+          content: answer,
+          createdAt: assistantCreatedAt,
+          sessionId: session.id,
+          title: session.title,
+        });
       } catch (error) {
         logger.error('[chat]', error.message);
         emit({ type: 'error', message: error.message });
