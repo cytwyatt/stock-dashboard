@@ -506,10 +506,24 @@ function facadeHarness({ marketTurnoverError = false } = {}) {
       : { count: 1, complete: false },
     getNews: async () => [],
     getStockNewsCN: async () => [],
+    getProfileCN: async (code) => { calls.push(['sina.profileCN', code]); return { code }; },
+    getProfileHK: async (code) => { calls.push(['sina.profileHK', code]); return { code }; },
+  };
+  const nasdaq = {
+    getProfile: async (code) => { calls.push(['nasdaq.profile', code]); return { code }; },
   };
   return {
     calls,
-    service: createMarketData({ yahoo, tencent, sina, annotateMarketData, isTXCode }),
+    service: createMarketData({
+      yahoo,
+      tencent,
+      sina,
+      nasdaq,
+      annotateMarketData,
+      isCNCode,
+      isHKCode,
+      isTXCode,
+    }),
   };
 }
 
@@ -521,6 +535,9 @@ test('market-data facade 只负责跨市场路由，并保持批量报价输入�
   await service.getMinute('hk00700');
   await service.getKline('sh600000', 90, 'day');
   await service.getQuote('MSFT');
+  await service.getProfile('sh600000');
+  await service.getProfile('hk00700');
+  await service.getProfile('AAPL');
   const quotes = await service.getQuotes(['AAPL', 'sh600000', 'hk00700', 'MSFT']);
 
   assert.deepEqual(calls, [
@@ -530,6 +547,9 @@ test('market-data facade 只负责跨市场路由，并保持批量报价输入�
     ['tencent.minute', 'hk00700'],
     ['tencent.kline', 'sh600000', 90, 'day'],
     ['yahoo.quote', 'MSFT'],
+    ['sina.profileCN', 'sh600000'],
+    ['sina.profileHK', 'hk00700'],
+    ['nasdaq.profile', 'AAPL'],
   ]);
   assert.deepEqual(quotes.map((quote) => quote.code), ['AAPL', 'sh600000', 'hk00700', 'MSFT']);
   assert.equal(quotes[0].market, 'us');

@@ -328,6 +328,14 @@ function createHttpHandler({
         const entry = await marketService.quote(code);
         return sendMarketJSON(res, entry, { market: marketForCode(code) }, marketMeta);
       }
+      if (pathname === '/api/profile') {
+        if (req.method !== 'GET') return sendJSON(res, 405, { error: 'method not allowed' });
+        const code = sanitizeCode(url.searchParams.get('code') || '');
+        if (!code) return sendJSON(res, 400, { error: 'code required' });
+        const market = marketForCode(code);
+        const entry = await marketService.profile(code);
+        return sendMarketJSON(res, entry, { market, currency: null }, marketMeta);
+      }
       if (pathname === '/api/quotes') {
         const codes = (url.searchParams.get('codes') || '')
           .split(',')

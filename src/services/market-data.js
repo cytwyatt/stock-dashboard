@@ -38,12 +38,17 @@ function createMarketData({
   yahoo,
   tencent,
   sina,
+  nasdaq,
   annotateMarketData,
+  isCNCode,
+  isHKCode,
   isTXCode,
 } = {}) {
   if (typeof annotateMarketData !== 'function') {
     throw new TypeError('annotateMarketData must be a function');
   }
+  if (typeof isCNCode !== 'function') throw new TypeError('isCNCode must be a function');
+  if (typeof isHKCode !== 'function') throw new TypeError('isHKCode must be a function');
   if (typeof isTXCode !== 'function') throw new TypeError('isTXCode must be a function');
 
   for (const method of ['getIndices', 'getMinute', 'getKline', 'getQuote', 'getQuotes', 'getRank', 'getOverview']) {
@@ -52,9 +57,10 @@ function createMarketData({
   for (const method of ['getIndices', 'getMinute', 'getKline', 'getSectors', 'getMarketTurnover', 'getQuote', 'getQuotes', 'searchStocks']) {
     requireMethod(tencent, method, 'tencent');
   }
-  for (const method of ['getRankCN', 'getRankHK', 'countLimit', 'getNews', 'getStockNewsCN']) {
+  for (const method of ['getRankCN', 'getRankHK', 'countLimit', 'getNews', 'getStockNewsCN', 'getProfileCN', 'getProfileHK']) {
     requireMethod(sina, method, 'sina');
   }
+  requireMethod(nasdaq, 'getProfile', 'nasdaq');
 
   const getIndices = (market) => market === 'us'
     ? yahoo.getIndices()
@@ -176,6 +182,9 @@ function createMarketData({
   const getRankCN = (dir, count) => sina.getRankCN(dir, count);
   const getRankHK = (dir, count) => sina.getRankHK(dir, count);
   const getRankUS = (dir, count) => yahoo.getRank(dir, count);
+  const getProfile = (code) => isCNCode(code)
+    ? sina.getProfileCN(code)
+    : isHKCode(code) ? sina.getProfileHK(code) : nasdaq.getProfile(code);
 
   return {
     getIndices,
@@ -190,6 +199,7 @@ function createMarketData({
       : market === 'hk' ? getRankHK(dir, count) : getRankCN(dir, count),
     getQuote,
     getQuotes,
+    getProfile,
     searchStocks: (query) => tencent.searchStocks(query),
     getOverviewCN,
     getOverviewHK,

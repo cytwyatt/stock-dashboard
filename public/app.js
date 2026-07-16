@@ -76,7 +76,10 @@ async function initWatch() {
 }
 
 const chart = echarts.init($('#chart'));
-window.addEventListener('resize', () => chart.resize());
+window.addEventListener('resize', () => {
+  chart.resize();
+  requestAnimationFrame(updateProfileToggle);
+});
 
 const UP = '#f0524f', DOWN = '#2ebd85', DIM = '#8b949e';
 const MA_COLORS = { MA5: '#e6b91e', MA10: '#4a9eff', MA20: '#c678dd' };
@@ -832,6 +835,8 @@ const modal = {
   market: 'cn',
   chartType: 'minute',
   req: 0,
+  profileReq: 0,
+  profileExpanded: false,
   researchReq: 0,
   researchTimer: null,
   chart: null,
@@ -879,6 +884,109 @@ function researchMetric({ label, value, valueClass = '', sub = '', subClass = ''
 function researchInsufficient(metric) {
   if (!metric || metric.reason !== 'insufficient_history') return '';
   return `需${metric.required || '--'}，现${metric.actual || 0}`;
+}
+
+function profileText(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function renderProfileLoading() {
+  const card = $('#mProfile');
+  card.style.display = 'block';
+  card.setAttribute('aria-busy', 'true');
+  setDataMeta($('#mProfileMeta'), null);
+  $('#mProfileBody').innerHTML = '<div class="profile-loading">正在加载行业与主营业务…</div>';
+}
+
+function updateProfileToggle() {
+  const summary = $('#mProfileBusiness');
+  const button = $('#mProfileToggle');
+  if (!summary || !button) return;
+  if (modal.profileExpanded) {
+    button.hidden = false;
+    return;
+  }
+  button.hidden = summary.scrollHeight <= summary.clientHeight + 1;
+}
+
+function toggleProfileBusiness() {
+  const summary = $('#mProfileBusiness');
+  const button = $('#mProfileToggle');
+  if (!summary || !button) return;
+  modal.profileExpanded = !modal.profileExpanded;
+  summary.classList.toggle('expanded', modal.profileExpanded);
+  button.textContent = modal.profileExpanded ? '收起' : '展开';
+  button.setAttribute('aria-expanded', String(modal.profileExpanded));
+  button.hidden = false;
+}
+
+function renderProfileUnavailable({ retry = false, meta = null } = {}) {
+  const card = $('#mProfile');
+  card.setAttribute('aria-busy', 'false');
+  setDataMeta($('#mProfileMeta'), meta);
+  $('#mProfileBody').innerHTML = `
+    <div class="profile-error">行业与主营业务资料暂不可用
+      ${retry ? '<button type="button" class="profile-retry" data-retry-profile>重试</button>' : ''}
+    </div>`;
+}
+
+function renderProfileCard(data) {
+  const industry = profileText(data && data.industry);
+  const sector = profileText(data && data.sector);
+  const business = profileText(data && data.businessSummary);
+  const classificationBasis = profileText(data && data.classificationBasis);
+  const coverage = data && data._meta && data._meta.coverage;
+  const degraded = !!(coverage && coverage.complete === false);
+  const classifications = [];
+  if (industry) classifications.push(['行业', industry]);
+  if (sector && sector !== industry) classifications.push(['板块', sector]);
+
+  if (!classifications.length && !business) {
+    renderProfileUnavailable({ meta: data && data._meta });
+    return;
+  }
+
+  const basisAttrs = classificationBasis
+    ? ` role="group" aria-label="分类口径：${escapeHtml(classificationBasis)}" title="分类口径：${escapeHtml(classificationBasis)}"`
+    : '';
+  const tags = classifications.length
+    ? `<div class="profile-tags"${basisAttrs}>${classifications.map(([label, value]) => `
+        <span class="profile-tag"><span class="profile-tag-label">${label}</span>${escapeHtml(value)}</span>`).join('')}
+      </div>`
+    : '<div class="profile-missing">行业分类暂缺</div>';
+  const businessContent = business
+    ? `<div class="profile-business-row">
+        <span class="profile-business-label">主营业务</span>
+        <p class="profile-business" id="mProfileBusiness">${escapeHtml(business)}</p>
+        <button type="button" class="profile-toggle" id="mProfileToggle" data-toggle-profile
+          aria-controls="mProfileBusiness" aria-expanded="false">展开</button>
+      </div>`
+    : '<div class="profile-missing">主营业务资料暂缺</div>';
+  const degradedNotice = degraded
+    ? '<div class="profile-degraded" role="status">部分资料暂缺，稍后重新打开时将重试</div>'
+    : '';
+
+  modal.profileExpanded = false;
+  $('#mProfileBody').innerHTML = degradedNotice + tags + businessContent;
+  setDataMeta($('#mProfileMeta'), data._meta);
+  $('#mProfile').setAttribute('aria-busy', 'false');
+  requestAnimationFrame(updateProfileToggle);
+}
+
+async function loadModalProfile() {
+  if (!modal.code) return;
+  const code = modal.code;
+  const req = ++modal.profileReq;
+  renderProfileLoading();
+  try {
+    const data = await api(`/api/profile?code=${encodeURIComponent(code)}`);
+    if (req !== modal.profileReq || modal.code !== code) return;
+    renderProfileCard(data || {});
+  } catch (error) {
+    if (req !== modal.profileReq || modal.code !== code) return;
+    console.error('company profile error', error);
+    renderProfileUnavailable({ retry: true });
+  }
 }
 
 function renderResearchLoading() {
@@ -1024,6 +1132,8 @@ function openStock(code, name = '') {
   $('#mChg').textContent = '';
   $('#mTime').textContent = '';
   $('#mStats').innerHTML = '';
+  modal.profileExpanded = false;
+  renderProfileLoading();
   $('#mBook').innerHTML = '';
   $('#mBook').style.display = 'none';
   $('#mResearch').style.display = 'block';
@@ -1042,6 +1152,7 @@ function openStock(code, name = '') {
   modal.chart.resize();
   loadModalQuote().catch(console.error);
   loadModalChart().catch(console.error);
+  loadModalProfile();
   loadModalResearch({ delay: 200 });
 }
 
@@ -1049,6 +1160,7 @@ function closeStock() {
   $('#stockModal').style.display = 'none';
   modal.code = null;
   modal.req++;
+  modal.profileReq++;
   modal.researchReq++;
   clearTimeout(modal.researchTimer);
   modal.researchTimer = null;
@@ -2285,6 +2397,10 @@ document.querySelectorAll('#mChartSwitch .switch-btn').forEach((b) =>
 );
 $('#mResearch').addEventListener('click', (e) => {
   if (e.target.closest('[data-retry-research]')) loadModalResearch();
+});
+$('#mProfile').addEventListener('click', (e) => {
+  if (e.target.closest('[data-retry-profile]')) loadModalProfile();
+  if (e.target.closest('[data-toggle-profile]')) toggleProfileBusiness();
 });
 $('#mClose').addEventListener('click', closeStock);
 $('#stockModal').addEventListener('click', (e) => {

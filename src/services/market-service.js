@@ -14,6 +14,8 @@ const CACHE_TTL = Object.freeze({
   quotes: 30000,
   search: 300000,
   news: 180000,
+  profile: 24 * 60 * 60 * 1000,
+  profileRefresh: 5 * 60 * 1000,
 });
 
 const cacheKeys = Object.freeze({
@@ -27,6 +29,8 @@ const cacheKeys = Object.freeze({
   quotes: (codes) => `qs:${codes.join(',')}`,
   search: (query) => `s:${query}`,
   news: () => 'news',
+  profile: (code) => `profile:${code}`,
+  profileRefresh: (code) => `profile-refresh:${code}`,
 });
 
 function immediateEntry(data) {
@@ -75,8 +79,10 @@ function createMarketService(deps) {
     getOverviewUS,
     getQuote,
     getQuotes,
+    getProfile,
     searchStocks,
     getNews,
+    getMarketDataMeta,
     isTXCode,
     isMarketOpen,
   } = deps;
@@ -158,6 +164,39 @@ function createMarketService(deps) {
         CACHE_TTL.quotes,
         () => getQuotes(normalizedCodes)
       );
+    },
+
+    async profile(code) {
+      try {
+        return await cachedEntry(
+          cacheKeys.profile(code),
+          CACHE_TTL.profile,
+          async () => {
+            const candidate = await cachedEntry(
+              cacheKeys.profileRefresh(code),
+              CACHE_TTL.profileRefresh,
+              () => getProfile(code)
+            );
+            const meta = getMarketDataMeta(candidate.data);
+            const incomplete = meta.coverage && meta.coverage.complete === false;
+            if (candidate.stale || incomplete) {
+              const reason = candidate.stale
+                ? 'profile_refresh_failed'
+                : meta.coverage.reason || 'profile_incomplete';
+              const error = new Error(`公司资料未完整刷新：${reason}`);
+              error.profileFallbackEntry = candidate;
+              throw error;
+            }
+            return candidate.data;
+          }
+        );
+      } catch (error) {
+        // With no previous complete entry, an incomplete candidate remains useful.
+        // If a complete entry exists, cachedEntry swallows this error and returns
+        // that older entry as stale instead, so partial data never overwrites it.
+        if (error && error.profileFallbackEntry) return error.profileFallbackEntry;
+        throw error;
+      }
     },
 
     async search(query) {

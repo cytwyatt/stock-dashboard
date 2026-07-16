@@ -8,6 +8,8 @@ const {
   cacheKeys,
   createMarketService,
 } = require('../src/services/market-service');
+const { createCacheRuntime } = require('../src/core/cache');
+const { annotateMarketData, getMarketDataMeta } = require('../src/core/market-meta');
 
 function createHarness({ marketOpen = true } = {}) {
   const cacheCalls = [];
@@ -41,8 +43,10 @@ function createHarness({ marketOpen = true } = {}) {
     getOverviewUS: provider('getOverviewUS'),
     getQuote: provider('getQuote'),
     getQuotes: provider('getQuotes'),
+    getProfile: provider('getProfile'),
     searchStocks: provider('searchStocks'),
     getNews: provider('getNews'),
+    getMarketDataMeta: () => ({}),
     isTXCode: (code) => /^(?:sh|sz|bj|hk)/.test(code),
     isMarketOpen: (market) => typeof marketOpen === 'function'
       ? marketOpen(market)
@@ -70,6 +74,8 @@ test('缓存 TTL 与 key 保持当前服务端契约', () => {
     quotes: 30000,
     search: 300000,
     news: 180000,
+    profile: 86400000,
+    profileRefresh: 300000,
   });
   assert.equal(cacheKeys.indices('hk'), 'idx:hk');
   assert.equal(cacheKeys.minute('AAPL'), 'min:AAPL');
@@ -83,6 +89,8 @@ test('缓存 TTL 与 key 保持当前服务端契约', () => {
   assert.equal(cacheKeys.quotes(['sh600519', 'AAPL']), 'qs:sh600519,AAPL');
   assert.equal(cacheKeys.search('茅台'), 's:茅台');
   assert.equal(cacheKeys.news(), 'news');
+  assert.equal(cacheKeys.profile('AAPL'), 'profile:AAPL');
+  assert.equal(cacheKeys.profileRefresh('AAPL'), 'profile-refresh:AAPL');
 });
 
 test('各方法使用对应 cache key、TTL 与 provider，并统一返回 entry', async () => {
@@ -142,6 +150,119 @@ test('各方法使用对应 cache key、TTL 与 provider，并统一返回 entry
     assert.equal(entry.stale, false, item.key);
     assert.deepEqual(entry.data, { provider: item.provider, args: item.args }, item.key);
   }
+});
+
+test('profile 以 5 分钟候选刷新完整 24 小时缓存', async () => {
+  const { service, cacheCalls, providerCalls } = createHarness();
+  const entry = await service.profile('AAPL');
+  assert.deepEqual(cacheCalls, [
+    { key: 'profile-refresh:AAPL', ttl: 300000 },
+    { key: 'profile:AAPL', ttl: 86400000 },
+  ]);
+  assert.deepEqual(providerCalls, [{ name: 'getProfile', args: ['AAPL'] }]);
+  assert.equal(entry.fetchedAt, 123);
+});
+
+function createProfileCacheHarness(loader) {
+  let clock = 1000;
+  const logs = [];
+  const runtime = createCacheRuntime({
+    now: () => clock,
+    logger: { error: (message) => logs.push(message) },
+  });
+  const service = createMarketService({
+    cachedEntry: runtime.cachedEntry,
+    getProfile: loader,
+    getMarketDataMeta,
+  });
+  return {
+    service,
+    logs,
+    advance(ms) { clock += ms; },
+  };
+}
+
+function profileData(version, complete, reason = null) {
+  return annotateMarketData({ version }, {
+    coverage: { complete, reason },
+  });
+}
+
+test('过期完整 profile 不被 partial 覆盖，并在短周期后重试', async () => {
+  let mode = 'complete-v1';
+  let calls = 0;
+  const harness = createProfileCacheHarness(async () => {
+    calls++;
+    if (mode === 'partial') return profileData('partial', false, 'industry_unavailable');
+    return profileData(mode, true);
+  });
+
+  const first = await harness.service.profile('sh600519');
+  assert.equal(first.data.version, 'complete-v1');
+  assert.equal(first.stale, false);
+  assert.equal(calls, 1);
+
+  harness.advance(CACHE_TTL.profile + 1);
+  mode = 'partial';
+  const fallback = await harness.service.profile('sh600519');
+  assert.equal(fallback.data.version, 'complete-v1');
+  assert.equal(fallback.stale, true);
+  assert.equal(getMarketDataMeta(fallback.data).coverage.complete, true);
+  assert.equal(calls, 2);
+  assert.match(harness.logs.at(-1), /industry_unavailable/);
+
+  harness.advance(CACHE_TTL.profileRefresh + 1);
+  mode = 'complete-v2';
+  const refreshed = await harness.service.profile('sh600519');
+  assert.equal(refreshed.data.version, 'complete-v2');
+  assert.equal(refreshed.stale, false);
+  assert.equal(calls, 3);
+});
+
+test('完整 profile 过期后上游失败时返回旧完整资料并标 stale', async () => {
+  let fail = false;
+  let calls = 0;
+  const harness = createProfileCacheHarness(async () => {
+    calls++;
+    if (fail) throw new Error('profile upstream down');
+    return profileData('complete', true);
+  });
+
+  await harness.service.profile('AAPL');
+  harness.advance(CACHE_TTL.profile + 1);
+  fail = true;
+  const fallback = await harness.service.profile('AAPL');
+  assert.equal(fallback.data.version, 'complete');
+  assert.equal(fallback.stale, true);
+  assert.equal(getMarketDataMeta(fallback.data).coverage.complete, true);
+  assert.equal(calls, 2);
+});
+
+test('首次只有 partial 时照常返回并按 5 分钟缓存，刷新失败不伪装完整', async () => {
+  let calls = 0;
+  let fail = false;
+  const harness = createProfileCacheHarness(async () => {
+    calls++;
+    if (fail) throw new Error('profile upstream down');
+    return profileData('partial', false, 'business_summary_unavailable');
+  });
+
+  const first = await harness.service.profile('sh688001');
+  assert.equal(first.data.version, 'partial');
+  assert.equal(first.stale, false);
+  assert.equal(getMarketDataMeta(first.data).coverage.complete, false);
+  assert.equal(calls, 1);
+
+  await harness.service.profile('sh688001');
+  assert.equal(calls, 1);
+
+  harness.advance(CACHE_TTL.profileRefresh + 1);
+  fail = true;
+  const stalePartial = await harness.service.profile('sh688001');
+  assert.equal(stalePartial.data.version, 'partial');
+  assert.equal(stalePartial.stale, true);
+  assert.equal(getMarketDataMeta(stalePartial.data).coverage.complete, false);
+  assert.equal(calls, 2);
 });
 
 test('非法 K 线天数回退为 90，研究卡所需 400 天不被截断', async () => {

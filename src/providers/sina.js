@@ -105,6 +105,96 @@ function decodeHtmlText(value) {
     .trim();
 }
 
+const PROFILE_TEXT_LIMIT = 1200;
+
+function normalizeProfileText(value, limit = PROFILE_TEXT_LIMIT) {
+  return decodeHtmlText(value).slice(0, limit) || null;
+}
+
+function tableCells(row) {
+  const cells = [];
+  const pattern = /<t[dh]\b[^>]*>([\s\S]*?)<\/t[dh]>/gi;
+  let match;
+  while ((match = pattern.exec(row))) cells.push(match[1]);
+  return cells;
+}
+
+function findSinaTableValue(html, label) {
+  const expected = String(label || '').replace(/[：:]$/, '');
+  const rows = String(html || '').match(/<tr\b[^>]*>[\s\S]*?<\/tr>/gi) || [];
+  for (const row of rows) {
+    const cells = tableCells(row);
+    for (let index = 0; index < cells.length - 1; index++) {
+      const key = decodeHtmlText(cells[index]).replace(/[：:]$/, '');
+      if (key === expected) {
+        return { found: true, value: normalizeProfileText(cells[index + 1]) };
+      }
+    }
+  }
+  return { found: false, value: null };
+}
+
+function extractSinaTableValue(html, label) {
+  return findSinaTableValue(html, label).value;
+}
+
+function requireSinaTableValue(html, label, context) {
+  const field = findSinaTableValue(html, label);
+  if (!field.found) throw new Error(`${context}页面结构异常：缺少${label}字段`);
+  return field.value;
+}
+
+function parseSinaCNIndustryPage(html) {
+  const tables = String(html || '').match(/<table\b[^>]*>[\s\S]*?<\/table>/gi) || [];
+  const table = tables.find((candidate) => /申万行业分类/.test(decodeHtmlText(candidate)));
+  if (!table || !/所属行业板块/.test(decodeHtmlText(table))) {
+    throw new Error('新浪A股行业页面结构异常：缺少申万行业分类表');
+  }
+  const rows = table.match(/<tr\b[^>]*>[\s\S]*?<\/tr>/gi) || [];
+  for (const row of rows) {
+    if (!/vCI_CorpInfoLink\.php/i.test(row)) continue;
+    const cells = tableCells(row);
+    const value = normalizeProfileText(cells[0]);
+    if (value && value !== '所属行业板块') return value;
+  }
+  return null;
+}
+
+function makeProfile({ code, market, sector = null, industry = null, businessSummary = '', classificationBasis }) {
+  const normalizedSector = normalizeProfileText(sector, 200);
+  const normalizedIndustry = normalizeProfileText(industry, 200);
+  const normalizedBusiness = normalizeProfileText(businessSummary) || '';
+  return {
+    code,
+    market,
+    available: !!(normalizedSector || normalizedIndustry || normalizedBusiness),
+    sector: normalizedSector,
+    industry: normalizedIndustry,
+    businessSummary: normalizedBusiness,
+    classificationBasis,
+  };
+}
+
+function parseSinaProfileCN(companyHtml, industryHtml, code) {
+  return makeProfile({
+    code,
+    market: 'cn',
+    industry: parseSinaCNIndustryPage(industryHtml),
+    businessSummary: requireSinaTableValue(companyHtml, '主营业务', '新浪A股公司资料'),
+    classificationBasis: '新浪财经申万行业分类',
+  });
+}
+
+function parseSinaProfileHK(html, code) {
+  return makeProfile({
+    code,
+    market: 'hk',
+    industry: requireSinaTableValue(html, '所属行业', '新浪港股公司资料'),
+    businessSummary: requireSinaTableValue(html, '公司业务', '新浪港股公司资料'),
+    classificationBasis: '新浪财经港股公司资料',
+  });
+}
+
 function normalizeNewsTitle(value) {
   return String(value || '')
     .normalize('NFKC')
@@ -245,12 +335,81 @@ function createSinaProvider({
     return parseSinaStockNewsPage(html, pageUrl);
   }
 
+  async function getProfileCN(rawCode) {
+    const code = String(rawCode || '').toLowerCase();
+    if (!isCNCode(code)) throw new Error('公司资料仅支持带 sh/sz/bj 前缀的A股代码');
+    const stockId = code.slice(2);
+    const companyUrl = `https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_CorpInfo/stockid/${stockId}.phtml`;
+    const industryUrl = `https://vip.stock.finance.sina.com.cn/corp/go.php/vCI_CorpOtherInfo/stockid/${stockId}/menu_num/2.phtml`;
+    const options = { encoding: 'gbk', referer: 'https://finance.sina.com.cn/' };
+    const [companyResult, industryResult] = await Promise.allSettled([
+      Promise.resolve()
+        .then(() => fetchText(companyUrl, options))
+        .then((html) => requireSinaTableValue(html, '主营业务', '新浪A股公司资料')),
+      Promise.resolve()
+        .then(() => fetchText(industryUrl, options))
+        .then(parseSinaCNIndustryPage),
+    ]);
+    if (companyResult.status === 'rejected' && industryResult.status === 'rejected') {
+      const reasons = [companyResult.reason, industryResult.reason]
+        .map((error) => error && error.message ? error.message : String(error))
+        .join('；');
+      throw new Error(`新浪A股公司资料获取失败：${reasons}`);
+    }
+    const profile = makeProfile({
+      code,
+      market: 'cn',
+      industry: industryResult.status === 'fulfilled' ? industryResult.value : null,
+      businessSummary: companyResult.status === 'fulfilled' ? companyResult.value : '',
+      classificationBasis: '新浪财经申万行业分类',
+    });
+    const complete = companyResult.status === 'fulfilled' && industryResult.status === 'fulfilled';
+    const reason = companyResult.status === 'rejected'
+      ? 'business_summary_unavailable'
+      : industryResult.status === 'rejected' ? 'industry_unavailable' : null;
+    return annotateMarketData(profile, {
+      market: 'cn',
+      source: '新浪财经公司资料',
+      currency: null,
+      timezone: 'Asia/Shanghai',
+      adjustmentBasis: 'none',
+      amountUnit: null,
+      coverage: {
+        complete,
+        reason,
+        businessSummary: companyResult.status === 'fulfilled',
+        industry: industryResult.status === 'fulfilled',
+      },
+    });
+  }
+
+  async function getProfileHK(rawCode) {
+    const code = String(rawCode || '').toLowerCase();
+    const match = /^hk(\d{5})$/.exec(code);
+    if (!match) throw new Error('公司资料仅支持带 hk 前缀的五位港股代码');
+    const pageUrl = `https://stock.finance.sina.com.cn/hkstock/info/${match[1]}.html`;
+    const html = await fetchText(pageUrl, {
+      encoding: 'gbk',
+      referer: 'https://finance.sina.com.cn/stock/hkstock/',
+    });
+    return annotateMarketData(parseSinaProfileHK(html, code), {
+      market: 'hk',
+      source: '新浪财经公司资料',
+      currency: null,
+      timezone: 'Asia/Hong_Kong',
+      adjustmentBasis: 'none',
+      amountUnit: null,
+    });
+  }
+
   return {
     getRankCN,
     getRankHK,
     countLimit,
     getNews,
     getStockNewsCN,
+    getProfileCN,
+    getProfileHK,
   };
 }
 
@@ -261,6 +420,12 @@ module.exports = {
   parseSinaRankCN,
   parseSinaRankHK,
   decodeHtmlText,
+  normalizeProfileText,
+  findSinaTableValue,
+  extractSinaTableValue,
+  parseSinaCNIndustryPage,
+  parseSinaProfileCN,
+  parseSinaProfileHK,
   normalizeNewsTitle,
   normalizeSinaNewsUrl,
   parseSinaStockNewsPage,

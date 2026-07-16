@@ -47,6 +47,7 @@ const {
   cnPriceLimitPct,
   isCNPriceLimit,
 } = require('./providers/sina');
+const { createNasdaqProvider } = require('./providers/nasdaq');
 
 const { createMarketData, summarizeSectorBreadth } = require('./services/market-data');
 const { createMarketService } = require('./services/market-service');
@@ -126,11 +127,18 @@ function createApplication({
     annotateMarketData,
     isCNCode,
   });
+  const nasdaq = createNasdaqProvider({
+    fetchText: httpClient.fetchText,
+    annotateMarketData,
+  });
   const marketData = createMarketData({
     yahoo,
     tencent,
     sina,
+    nasdaq,
     annotateMarketData,
+    isCNCode,
+    isHKCode,
     isTXCode,
   });
 
@@ -158,8 +166,10 @@ function createApplication({
     getOverviewUS: marketData.getOverviewUS,
     getQuote: marketData.getQuote,
     getQuotes: marketData.getQuotes,
+    getProfile: marketData.getProfile,
     searchStocks: marketData.searchStocks,
     getNews: marketData.getNews,
+    getMarketDataMeta,
     isTXCode,
     isMarketOpen,
   });
