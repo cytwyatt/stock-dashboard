@@ -6,6 +6,8 @@ const assert = require('node:assert/strict');
 const {
   CACHE_TTL,
   cacheKeys,
+  PROFILE_INDUSTRY_LIMIT,
+  PROFILE_INDUSTRY_CONCURRENCY,
   createMarketService,
 } = require('../src/services/market-service');
 const { createCacheRuntime } = require('../src/core/cache');
@@ -47,6 +49,7 @@ function createHarness({ marketOpen = true } = {}) {
     searchStocks: provider('searchStocks'),
     getNews: provider('getNews'),
     getMarketDataMeta: () => ({}),
+    annotateMarketData,
     isTXCode: (code) => /^(?:sh|sz|bj|hk)/.test(code),
     isMarketOpen: (market) => typeof marketOpen === 'function'
       ? marketOpen(market)
@@ -60,6 +63,8 @@ function createHarness({ marketOpen = true } = {}) {
 }
 
 test('缓存 TTL 与 key 保持当前服务端契约', () => {
+  assert.equal(PROFILE_INDUSTRY_LIMIT, 20);
+  assert.equal(PROFILE_INDUSTRY_CONCURRENCY, 3);
   assert.deepEqual(CACHE_TTL, {
     indices: 15000,
     minuteTX: 30000,
@@ -174,6 +179,7 @@ function createProfileCacheHarness(loader) {
     cachedEntry: runtime.cachedEntry,
     getProfile: loader,
     getMarketDataMeta,
+    annotateMarketData,
   });
   return {
     service,
@@ -263,6 +269,148 @@ test('首次只有 partial 时照常返回并按 5 分钟缓存，刷新失败�
   assert.equal(stalePartial.stale, true);
   assert.equal(getMarketDataMeta(stalePartial.data).coverage.complete, false);
   assert.equal(calls, 2);
+});
+
+test('profileIndustries 精简资料、逐项容错并聚合 partial/stale coverage', async () => {
+  const fixtures = {
+    OK: annotateMarketData({
+      available: true, industry: '软件', sector: '科技', classificationBasis: '测试行业分类',
+    }, { market: 'cn', source: '资料源A', timezone: 'Asia/Shanghai', coverage: { complete: true, industry: true } }),
+    BIZPART: annotateMarketData({
+      available: true, industry: '半导体', sector: null, classificationBasis: '测试行业分类',
+    }, {
+      market: 'cn', source: '资料源A', timezone: 'Asia/Shanghai',
+      coverage: { complete: false, industry: true, reason: 'business_summary_unavailable' },
+    }),
+    INDPART: annotateMarketData({
+      available: true, industry: null, sector: null, classificationBasis: '测试行业分类',
+    }, {
+      market: 'cn', source: '资料源A', timezone: 'Asia/Shanghai',
+      coverage: { complete: false, industry: false, reason: 'industry_unavailable' },
+    }),
+    NONE: annotateMarketData({
+      available: false, industry: null, sector: null, classificationBasis: 'Nasdaq Sector / Industry',
+    }, { market: 'us', source: '资料源B', timezone: 'America/New_York' }),
+    STALE: annotateMarketData({
+      available: true, industry: '旧行业', sector: null, classificationBasis: '测试行业分类',
+    }, { market: 'cn', source: '资料源A', timezone: 'Asia/Shanghai', coverage: { complete: true, industry: true } }),
+  };
+  const service = createMarketService({
+    cachedEntry: async (key, ttl, loader) => {
+      const data = await loader();
+      const stale = key === 'profile:STALE';
+      return { data, fetchedAt: 1000, stale, staleSince: stale ? 900 : null };
+    },
+    getProfile: async (code) => {
+      if (code === 'ERR') throw new Error('upstream failed');
+      return fixtures[code];
+    },
+    getMarketDataMeta,
+    annotateMarketData,
+  });
+
+  const entry = await service.profileIndustries([
+    'OK', 'BIZPART', 'INDPART', 'NONE', 'ERR', 'STALE',
+  ]);
+  assert.deepEqual(entry.data.map(({ code, status, stale }) => ({ code, status, stale })), [
+    { code: 'OK', status: 'ok', stale: false },
+    { code: 'BIZPART', status: 'ok', stale: false },
+    { code: 'INDPART', status: 'partial', stale: false },
+    { code: 'NONE', status: 'unavailable', stale: false },
+    { code: 'ERR', status: 'error', stale: false },
+    { code: 'STALE', status: 'stale', stale: true },
+  ]);
+  assert.deepEqual(entry.data[0], {
+    code: 'OK', industry: '软件', sector: '科技', classificationBasis: '测试行业分类',
+    status: 'ok', stale: false,
+  });
+  assert.deepEqual(entry.data[4], {
+    code: 'ERR', industry: null, sector: null, classificationBasis: null,
+    status: 'error', stale: false,
+  });
+  assert.equal(entry.stale, true);
+  assert.equal(entry.fetchedAt, 1000, '聚合接口保留最早的实际资料抓取时间');
+  assert.equal(entry.staleSince, 900);
+  assert.deepEqual(getMarketDataMeta(entry.data).coverage, {
+    requested: 6,
+    withClassification: 3,
+    ok: 2,
+    unavailable: 1,
+    partial: 1,
+    error: 1,
+    stale: 1,
+    complete: false,
+  });
+  assert.equal(getMarketDataMeta(entry.data).market, null, '混合市场不得冒充单一市场');
+  assert.equal(getMarketDataMeta(entry.data).source, '资料源A / 资料源B');
+});
+
+function createIndustryConcurrencyService(getProfile) {
+  return createMarketService({
+    cachedEntry: async (key, ttl, loader) => ({
+      data: await loader(), fetchedAt: 1000, stale: false, staleSince: null,
+    }),
+    getProfile,
+    getMarketDataMeta,
+    annotateMarketData,
+  });
+}
+
+test('profileIndustries 跨批次共享并发上限3，并在 service 层去重和限制20只', async () => {
+  let active = 0;
+  let maxActive = 0;
+  const calls = [];
+  const service = createIndustryConcurrencyService(async (code) => {
+    calls.push(code);
+    active++;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active--;
+    return annotateMarketData({ available: true, industry: `行业${code}` }, {
+      source: '测试资料', coverage: { complete: true, industry: true },
+    });
+  });
+
+  const codes = Array.from({ length: 25 }, (_, index) => `C${index}`);
+  const [first, second] = await Promise.all([
+    service.profileIndustries([codes[0].toLowerCase(), codes[0], ...codes]),
+    service.profileIndustries(['X0', 'X1', 'X2', 'X3']),
+  ]);
+  assert.equal(maxActive, 3);
+  assert.equal(first.data.length, 20);
+  assert.deepEqual(first.data.map((item) => item.code), codes.slice(0, 20));
+  assert.deepEqual(second.data.map((item) => item.code), ['X0', 'X1', 'X2', 'X3']);
+  assert.equal(calls.filter((code) => code === 'C0').length, 1);
+});
+
+test('直接 profile 详情不被 profileIndustries 低优先级队列阻塞', async () => {
+  let rankStarted = 0;
+  let directStarted = false;
+  const releases = [];
+  const service = createIndustryConcurrencyService(async (code) => {
+    if (code === 'DIRECT') {
+      directStarted = true;
+      return annotateMarketData({ available: true, industry: '直达' }, {
+        coverage: { complete: true, industry: true },
+      });
+    }
+    rankStarted++;
+    return new Promise((resolve) => releases.push(() => resolve(annotateMarketData({
+      available: true, industry: `行业${code}`,
+    }, { coverage: { complete: true, industry: true } }))));
+  });
+
+  const batch = service.profileIndustries(['A', 'B', 'C', 'D']);
+  while (rankStarted < 3) await new Promise((resolve) => setImmediate(resolve));
+  const direct = await service.profile('DIRECT');
+  assert.equal(directStarted, true);
+  assert.equal(direct.data.industry, '直达');
+  assert.equal(rankStarted, 3, '第四个榜单任务仍应在共享队列中');
+
+  while (releases.length) releases.shift()();
+  while (rankStarted < 4) await new Promise((resolve) => setImmediate(resolve));
+  while (releases.length) releases.shift()();
+  await batch;
 });
 
 test('非法 K 线天数回退为 90，研究卡所需 400 天不被截断', async () => {

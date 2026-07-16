@@ -13,6 +13,7 @@ const { AUTH_MAXAGE, createAuth } = require('../src/http/auth');
 const { createStaticServer } = require('../src/http/static');
 const { sendJSON } = require('../src/http/response');
 const { createHttpHandler } = require('../src/http/router');
+const { normalizeProfileCode } = require('../src/core/symbols');
 
 function tempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'market-http-'));
@@ -246,6 +247,7 @@ test('公司资料路由只接受 GET，校验代码并返回统一市场元数�
     chatStore: {},
     marketMeta: (entry, spec) => ({ ...spec, fetchedAt: entry.fetchedAt }),
     sanitizeCode: (value) => String(value || '').replace(/[^A-Z]/g, ''),
+    normalizeProfileCode,
     marketForCode: () => 'us',
     env: {},
     logger: { error() {} },
@@ -267,6 +269,73 @@ test('公司资料路由只接受 GET，校验代码并返回统一市场元数�
   assert.deepEqual(JSON.parse(ok.body), {
     data: { code: 'AAPL', market: 'us', available: true, sector: 'Technology' },
     meta: { market: 'us', currency: null, fetchedAt: 1000 },
+  });
+});
+
+test('行业批量路由只接受 GET，sanitize 后去重并限制20只', async () => {
+  const calls = [];
+  const handler = createHttpHandler({
+    port: 3888,
+    auth: createAuth(),
+    staticServer: { resolvePath: () => null },
+    marketService: {
+      async profileIndustries(codes) {
+        calls.push(codes);
+        return {
+          data: codes.map((code) => ({
+            code, industry: `行业${code}`, sector: null,
+            classificationBasis: '测试分类', status: 'ok', stale: false,
+          })),
+          fetchedAt: 1000,
+          stale: false,
+          staleSince: null,
+        };
+      },
+    },
+    chatService: {},
+    llmConfigStore: {},
+    llmClient: {},
+    watchlistStore: {},
+    chatStore: {},
+    marketMeta: (entry, spec) => ({ ...spec, fetchedAt: entry.fetchedAt }),
+    sanitizeCode: (value) => {
+      const code = String(value || '').replace(/[^a-zA-Z0-9-]/g, '');
+      return code.toLowerCase() === 'bad' ? '' : code;
+    },
+    normalizeProfileCode,
+    marketForCode: () => 'us',
+    env: {},
+    logger: { error() {} },
+  });
+
+  const missing = mockResponse();
+  await handler(mockRequest({ url: '/api/profile-industries?codes=' }), missing);
+  assert.equal(missing.status, 400);
+  assert.deepEqual(JSON.parse(missing.body), { error: 'codes required' });
+
+  const method = mockResponse();
+  await handler(mockRequest({
+    url: '/api/profile-industries?codes=AAPL', method: 'POST',
+  }), method);
+  assert.equal(method.status, 405);
+
+  const rawCodes = [
+    'aapl', 'AAPL', 'SH600519', 'sh600519', 'bad!',
+    ...Array.from({ length: 25 }, (_, index) => `s${index}`),
+  ];
+  const ok = mockResponse();
+  await handler(mockRequest({
+    url: `/api/profile-industries?codes=${encodeURIComponent(rawCodes.join(','))}`,
+  }), ok);
+  assert.equal(ok.status, 200);
+  const expectedCodes = ['AAPL', 'sh600519', ...Array.from({ length: 18 }, (_, index) => `S${index}`)];
+  assert.deepEqual(calls, [expectedCodes]);
+  assert.deepEqual(JSON.parse(ok.body), {
+    data: expectedCodes.map((code) => ({
+      code, industry: `行业${code}`, sector: null,
+      classificationBasis: '测试分类', status: 'ok', stale: false,
+    })),
+    meta: { currency: null, fetchedAt: 1000 },
   });
 });
 

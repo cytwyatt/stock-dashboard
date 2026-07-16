@@ -9,6 +9,7 @@ const {
   createYahooProvider,
   parseSparkQuotes,
   parseYahooKline,
+  parseYahooRank,
 } = require('../src/providers/yahoo');
 const {
   createTencentProvider,
@@ -434,6 +435,72 @@ test('新浪港股榜单并行抓三页并按原顺序质量过滤', async () =>
   const rank = await provider.getRankHK('up', 2);
   assert.equal(urls.length, 3);
   assert.deepEqual(rank.map((item) => item.code), ['hk00002', 'hk00004']);
+});
+
+test('Yahoo 涨跌榜请求行业字段，并安全规范化可选行业分类', async () => {
+  let requestedUrl = '';
+  const payload = {
+    finance: {
+      result: [{
+        quotes: [
+          null,
+          {
+            symbol: 'AAPL', shortName: 'Apple', currency: 'USD',
+            regularMarketPrice: 200, regularMarketChange: 2,
+            regularMarketChangePercent: 1, fullExchangeName: 'NasdaqGS',
+            sector: '  <b>Technology</b>\u0000  ',
+            industry: { raw: ' Consumer   Electronics ' },
+          },
+          {
+            symbol: 'ETF', shortName: 'ETF', currency: 'USD',
+            regularMarketPrice: 10, sector: ['invalid'], industry: null,
+          },
+        ],
+      }],
+    },
+  };
+  const provider = createYahooProvider({
+    fetchText: async (url) => {
+      requestedUrl = url;
+      return JSON.stringify(payload);
+    },
+    annotateMarketData,
+    scheduler: { run: (task) => task() },
+    minIntervalMs: 0,
+  });
+
+  const rank = await provider.getRank('up', 2);
+  assert.deepEqual(new URL(requestedUrl).searchParams.get('fields').split(','), [
+    'symbol',
+    'shortName',
+    'longName',
+    'currency',
+    'regularMarketPrice',
+    'regularMarketChange',
+    'regularMarketChangePercent',
+    'fullExchangeName',
+    'sector',
+    'industry',
+  ]);
+  assert.equal(rank.length, 2, '异常空行不应占用返回名额');
+  assert.deepEqual(rank[0], {
+    code: 'AAPL',
+    name: 'Apple',
+    currency: 'USD',
+    price: 200,
+    change: 2,
+    changePct: 1,
+    market: 'NasdaqGS',
+    sector: 'Technology',
+    industry: 'Consumer Electronics',
+  });
+  assert.equal(Object.hasOwn(rank[1], 'sector'), false);
+  assert.equal(Object.hasOwn(rank[1], 'industry'), false);
+
+  const capped = parseYahooRank({
+    finance: { result: [{ quotes: [{ symbol: 'LONG', sector: 'x'.repeat(300) }] }] },
+  }, 1, { annotateMarketData, num });
+  assert.equal(capped[0].sector.length, 200);
 });
 
 test('新浪个股资讯仅接受新浪域名、清理锚点并拒绝结构漂移', () => {

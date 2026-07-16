@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const {
   sanitizeCode,
+  normalizeProfileCode,
   isCNCode,
   isHKCode,
   isKnownHKCode,
@@ -19,6 +20,15 @@ test('sanitizeCode 仅保留当前支持的代码字符并限制为 20 位', () 
   assert.equal(sanitizeCode('GC=F'), 'GC=F');
   assert.equal(sanitizeCode('BTC-USD'), 'BTC-USD');
   assert.equal(sanitizeCode('12345678901234567890EXTRA'), '12345678901234567890');
+});
+
+test('normalizeProfileCode 统一 A/H 前缀与美股代码大小写', () => {
+  assert.equal(normalizeProfileCode('SH600519'), 'sh600519');
+  assert.equal(normalizeProfileCode('Sz300750'), 'sz300750');
+  assert.equal(normalizeProfileCode('HK00700'), 'hk00700');
+  assert.equal(normalizeProfileCode('hkhstech'), 'hkHSTECH');
+  assert.equal(normalizeProfileCode('aapl'), 'AAPL');
+  assert.equal(normalizeProfileCode('brk-b'), 'BRK-B');
 });
 
 test('A股、港股和腾讯代码判断保持大小写与已知指数约束', () => {

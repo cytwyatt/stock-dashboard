@@ -21,6 +21,7 @@ function createHttpHandler({
   chatStore,
   marketMeta,
   sanitizeCode,
+  normalizeProfileCode,
   marketForCode,
   env = process.env,
   logger = console,
@@ -330,11 +331,26 @@ function createHttpHandler({
       }
       if (pathname === '/api/profile') {
         if (req.method !== 'GET') return sendJSON(res, 405, { error: 'method not allowed' });
-        const code = sanitizeCode(url.searchParams.get('code') || '');
+        const code = normalizeProfileCode(sanitizeCode(url.searchParams.get('code') || ''));
         if (!code) return sendJSON(res, 400, { error: 'code required' });
         const market = marketForCode(code);
         const entry = await marketService.profile(code);
         return sendMarketJSON(res, entry, { market, currency: null }, marketMeta);
+      }
+      if (pathname === '/api/profile-industries') {
+        if (req.method !== 'GET') return sendJSON(res, 405, { error: 'method not allowed' });
+        const codes = [];
+        const seen = new Set();
+        for (const rawCode of (url.searchParams.get('codes') || '').split(',')) {
+          const code = normalizeProfileCode(sanitizeCode(rawCode));
+          if (!code || seen.has(code)) continue;
+          seen.add(code);
+          codes.push(code);
+          if (codes.length >= 20) break;
+        }
+        if (!codes.length) return sendJSON(res, 400, { error: 'codes required' });
+        const entry = await marketService.profileIndustries(codes);
+        return sendMarketJSON(res, entry, { currency: null }, marketMeta);
       }
       if (pathname === '/api/quotes') {
         const codes = (url.searchParams.get('codes') || '')

@@ -17,6 +17,7 @@ const {
 } = require('./core/market-meta');
 const {
   sanitizeCode,
+  normalizeProfileCode,
   isCNCode,
   isHKCode,
   isKnownHKCode,
@@ -170,6 +171,7 @@ function createApplication({
     searchStocks: marketData.searchStocks,
     getNews: marketData.getNews,
     getMarketDataMeta,
+    annotateMarketData,
     isTXCode,
     isMarketOpen,
   });
@@ -263,6 +265,7 @@ function createApplication({
     chatStore,
     marketMeta,
     sanitizeCode,
+    normalizeProfileCode,
     marketForCode,
     env,
     logger,

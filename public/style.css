@@ -568,6 +568,29 @@ a.market-review-citation-title { text-decoration: underline; text-underline-offs
 .rank-table td:first-child { text-align: left; }
 .stock-name { font-weight: 600; }
 .stock-code { color: var(--text-dim); font-size: 11px; }
+#rankSection .rank-stock-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+#rankSection .rank-stock-meta .stock-code { flex: 0 0 auto; }
+#rankSection .rank-industry {
+  min-width: 0;
+  overflow: hidden;
+  padding-left: 5px;
+  border-left: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#rankSection .rank-industry.is-loading,
+#rankSection .rank-industry.is-error,
+#rankSection .rank-industry.is-missing,
+#rankSection .rank-industry.is-stale { opacity: 0.72; }
 .watch-actions { display: flex; align-items: center; justify-content: flex-end; gap: 5px; }
 .ask-ai-btn {
   display: inline-flex;
@@ -1201,7 +1224,9 @@ a.market-review-citation-title { text-decoration: underline; text-underline-offs
   .sector-wrap { grid-template-columns: 1fr; gap: 12px; }
   .rank-wrap { grid-template-columns: 1fr; }
   #rankSection .rank-table { table-layout: fixed; }
-  #rankSection .rank-table th:first-child, #rankSection .rank-table td:first-child { width: 44%; }
+  #rankSection .rank-table th:first-child, #rankSection .rank-table td:first-child { width: 50%; }
+  #rankSection .rank-table th:nth-child(2), #rankSection .rank-table td:nth-child(2),
+  #rankSection .rank-table th:nth-child(3), #rankSection .rank-table td:nth-child(3) { width: 25%; }
   #rankSection .stock-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sector-leader { font-size: 11px; }
   .news-title { font-size: 13px; }

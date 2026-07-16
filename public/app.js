@@ -722,7 +722,95 @@ async function loadSectors() {
 }
 
 /* ---------- 涨跌榜 ---------- */
-function renderRank(el, rows) {
+const RANK_INDUSTRY_LONG_TTL = 24 * 60 * 60 * 1000;
+const RANK_INDUSTRY_SHORT_TTL = 5 * 60 * 1000;
+const RANK_INDUSTRY_CACHE_MAX = 500;
+const rankIndustryCache = new Map();
+const rankIndustryInflight = new Map();
+let rankReq = 0;
+
+function rankIndustryText(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function rankIndustryCode(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function freshRankIndustry(code) {
+  const key = rankIndustryCode(code);
+  const entry = rankIndustryCache.get(key);
+  if (!entry) return null;
+  if (entry.expiresAt > Date.now()) {
+    rankIndustryCache.delete(key);
+    rankIndustryCache.set(key, entry);
+    return entry;
+  }
+  rankIndustryCache.delete(key);
+  return null;
+}
+
+function pruneRankIndustryCache(now = Date.now()) {
+  rankIndustryCache.forEach((entry, code) => {
+    if (!entry || entry.expiresAt <= now) rankIndustryCache.delete(code);
+  });
+  while (rankIndustryCache.size > RANK_INDUSTRY_CACHE_MAX) {
+    rankIndustryCache.delete(rankIndustryCache.keys().next().value);
+  }
+}
+
+function rankIndustryDisplay(row, { pending = false } = {}) {
+  const inlineIndustry = rankIndustryText(row && row.industry);
+  const inlineSector = rankIndustryText(row && row.sector);
+  const cached = freshRankIndustry(row && row.code);
+  const hasInlineClassification = !!(inlineIndustry || inlineSector);
+  const industry = hasInlineClassification
+    ? inlineIndustry
+    : rankIndustryText(cached && cached.industry);
+  const sector = hasInlineClassification
+    ? inlineSector
+    : rankIndustryText(cached && cached.sector);
+  const basis = rankIndustryText(
+    hasInlineClassification && row && row.classificationBasis
+      ? row.classificationBasis
+      : cached && cached.classificationBasis
+  );
+  const stale = !hasInlineClassification && !!(cached && cached.stale);
+
+  if (industry) {
+    return {
+      text: industry,
+      title: `行业：${industry}${basis ? `（${basis}）` : ''}${stale ? '；缓存资料，等待刷新' : ''}`,
+      state: stale ? 'is-stale' : '',
+    };
+  }
+  if (sector) {
+    return {
+      text: `板块：${sector}`,
+      title: `板块：${sector}${basis ? `（${basis}）` : ''}${stale ? '；缓存资料，等待刷新' : ''}`,
+      state: stale ? 'is-stale' : '',
+    };
+  }
+
+  const status = String(cached && cached.status || '').toLowerCase();
+  if (status === 'error' || status === 'failed' || status === 'failure') {
+    return { text: '行业加载失败', title: '行业资料暂时加载失败', state: 'is-error' };
+  }
+  if (!cached && (pending || rankIndustryInflight.has(rankIndustryCode(row && row.code)))) {
+    return { text: '行业加载中', title: '正在加载行业资料', state: 'is-loading' };
+  }
+  return { text: '行业暂缺', title: '暂无可靠行业资料', state: 'is-missing' };
+}
+
+function setRankIndustryNode(node, row, options) {
+  if (!node) return;
+  const display = rankIndustryDisplay(row, options);
+  node.className = `rank-industry${display.state ? ` ${display.state}` : ''}`;
+  node.textContent = display.text;
+  node.title = display.title;
+}
+
+function renderRank(el, rows, { industriesPending = false } = {}) {
   const currencies = [...new Set(rows.map((s) => s.currency).filter(Boolean))];
   const priceHead = currencies.length === 1 ? `最新价 · ${escapeHtml(currencies[0])}` : '最新价';
   el.innerHTML =
@@ -731,26 +819,125 @@ function renderRank(el, rows) {
       .map(
         (s) => `
       <tr data-code="${escapeHtml(s.code)}" data-name="${escapeHtml(s.name)}">
-        <td><div class="stock-name">${escapeHtml(s.name)}</div><div class="stock-code">${escapeHtml(s.code.toUpperCase())}</div></td>
+        <td>
+          <div class="stock-name">${escapeHtml(s.name)}</div>
+          <div class="rank-stock-meta">
+            <span class="stock-code">${escapeHtml(s.code.toUpperCase())}</span>
+            <span class="rank-industry"></span>
+          </div>
+        </td>
         <td>${s.price.toFixed(2)}</td>
         <td class="${colorCls(s.changePct)}">${fmtPct(s.changePct)}</td>
       </tr>`
       )
       .join('');
-  el.querySelectorAll('tr[data-code]').forEach((tr) =>
-    tr.addEventListener('click', () => openStock(tr.dataset.code, tr.dataset.name))
-  );
+  el.querySelectorAll('tr[data-code]').forEach((tr, index) => {
+    setRankIndustryNode(tr.querySelector('.rank-industry'), rows[index], {
+      pending: industriesPending,
+    });
+    tr.addEventListener('click', () => openStock(tr.dataset.code, tr.dataset.name));
+  });
+}
+
+function cacheRankIndustry(item, fallbackCode) {
+  const code = rankIndustryCode(item && item.code || fallbackCode);
+  if (!code) return;
+  const status = String(item && item.status || '').trim().toLowerCase();
+  const stale = !!(item && item.stale) || status === 'stale';
+  const shortLived = stale
+    || ['partial', 'error', 'failed', 'failure'].includes(status);
+  const stable = ['complete', 'ok', 'success', 'available', 'unavailable', 'not_found', 'not-found'].includes(status);
+  const now = Date.now();
+  pruneRankIndustryCache(now);
+  rankIndustryCache.delete(code);
+  rankIndustryCache.set(code, {
+    industry: rankIndustryText(item && item.industry),
+    sector: rankIndustryText(item && item.sector),
+    classificationBasis: rankIndustryText(item && item.classificationBasis),
+    status: status || 'partial',
+    stale,
+    expiresAt: now + (!shortLived && stable
+      ? RANK_INDUSTRY_LONG_TTL
+      : RANK_INDUSTRY_SHORT_TTL),
+  });
+  pruneRankIndustryCache(now);
+}
+
+function patchRankIndustries(rows, req, market) {
+  if (req !== rankReq || market !== state.market) return;
+  const rowByCode = new Map(rows.map((row) => [rankIndustryCode(row.code), row]));
+  ['#rankUp', '#rankDown'].forEach((selector) => {
+    document.querySelectorAll(`${selector} tr[data-code]`).forEach((tr) => {
+      const row = rowByCode.get(rankIndustryCode(tr.dataset.code));
+      if (row) setRankIndustryNode(tr.querySelector('.rank-industry'), row);
+    });
+  });
+}
+
+async function loadRankIndustries(rows, req, market) {
+  pruneRankIndustryCache();
+  const uniqueRows = new Map();
+  rows.forEach((row) => {
+    const code = rankIndustryCode(row && row.code);
+    if (code && !uniqueRows.has(code)) uniqueRows.set(code, row);
+  });
+
+  const waits = new Set();
+  const missing = [];
+  uniqueRows.forEach((row, code) => {
+    if (rankIndustryText(row.industry) || rankIndustryText(row.sector) || freshRankIndustry(code)) return;
+    const inflight = rankIndustryInflight.get(code);
+    if (inflight) waits.add(inflight);
+    else missing.push({ code, rawCode: String(row.code || '').trim() });
+  });
+
+  if (missing.length) {
+    let batchPromise;
+    batchPromise = (async () => {
+      try {
+        const result = await api(`/api/profile-industries?codes=${encodeURIComponent(missing.map((item) => item.rawCode).join(','))}`);
+        const returned = new Set();
+        if (!Array.isArray(result)) throw new Error('行业批量响应格式异常');
+        result.forEach((item) => {
+          const code = rankIndustryCode(item && item.code);
+          if (!code || !uniqueRows.has(code)) return;
+          returned.add(code);
+          cacheRankIndustry(item, code);
+        });
+        missing.forEach(({ code }) => {
+          if (!returned.has(code)) cacheRankIndustry({ code, status: 'error' }, code);
+        });
+      } catch (error) {
+        console.error('rank industry error', error);
+        missing.forEach(({ code }) => cacheRankIndustry({ code, status: 'error' }, code));
+      } finally {
+        missing.forEach(({ code }) => {
+          if (rankIndustryInflight.get(code) === batchPromise) rankIndustryInflight.delete(code);
+        });
+      }
+    })();
+    missing.forEach(({ code }) => rankIndustryInflight.set(code, batchPromise));
+    waits.add(batchPromise);
+  }
+
+  if (waits.size) await Promise.allSettled([...waits]);
+  patchRankIndustries(rows, req, market);
 }
 
 async function loadRanks() {
+  const req = ++rankReq;
   const market = state.market;
   const [up, down] = await Promise.all([
     api(`/api/rank?market=${market}&dir=up`),
     api(`/api/rank?market=${market}&dir=down`),
   ]);
-  if (market !== state.market) return; // 响应回来前切了 tab，丢弃
-  renderRank($('#rankUp'), up.slice(0, 10));
-  renderRank($('#rankDown'), down.slice(0, 10));
+  if (req !== rankReq || market !== state.market) return; // 旧轮询或切 tab 后的响应直接丢弃
+  const upRows = up.slice(0, 10);
+  const downRows = down.slice(0, 10);
+  const needsBatch = market === 'cn' || market === 'hk';
+  renderRank($('#rankUp'), upRows, { industriesPending: needsBatch });
+  renderRank($('#rankDown'), downRows, { industriesPending: needsBatch });
+  if (needsBatch) void loadRankIndustries([...upRows, ...downRows], req, market);
 }
 
 /* ---------- 自选股列表 ---------- */
@@ -1804,6 +1991,7 @@ async function loadMarketReview() {
 /* ---------- 市场切换 ---------- */
 async function switchMarket(market) {
   summaryReq++; // 使上一市场或同市场的旧复盘请求立即失效
+  rankReq++; // 榜单与行业补全也按请求序号失效，防止旧响应覆盖新市场
   closeMarketReview({ restoreFocus: false });
   activeMarketReview = null;
   marketReviewNeedsPolling = false;

@@ -242,15 +242,36 @@ function parseYahooRank(payload, count, { annotateMarketData, num = defaultNum }
   const quotes =
     (payload.finance && payload.finance.result && payload.finance.result[0]
       && payload.finance.result[0].quotes) || [];
-  const out = quotes.slice(0, count).map((quote) => ({
-    code: quote.symbol,
-    name: quote.shortName || quote.longName || quote.symbol,
-    currency: quote.currency || 'USD',
-    price: num(quote.regularMarketPrice),
-    change: num(quote.regularMarketChange),
-    changePct: num(quote.regularMarketChangePercent),
-    market: quote.fullExchangeName || '',
-  }));
+  const normalizeClassification = (value) => {
+    const raw = value && typeof value === 'object' && !Array.isArray(value)
+      ? value.raw ?? value.fmt ?? value.value
+      : value;
+    if (typeof raw !== 'string' && typeof raw !== 'number') return null;
+    return String(raw)
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 200) || null;
+  };
+  const out = quotes
+    .filter((quote) => quote && typeof quote === 'object' && !Array.isArray(quote))
+    .slice(0, count)
+    .map((quote) => {
+      const sector = normalizeClassification(quote.sector);
+      const industry = normalizeClassification(quote.industry);
+      return {
+        code: quote.symbol,
+        name: quote.shortName || quote.longName || quote.symbol,
+        currency: quote.currency || 'USD',
+        price: num(quote.regularMarketPrice),
+        change: num(quote.regularMarketChange),
+        changePct: num(quote.regularMarketChangePercent),
+        market: quote.fullExchangeName || '',
+        ...(sector ? { sector } : {}),
+        ...(industry ? { industry } : {}),
+      };
+    });
   const currencies = [...new Set(out.map((quote) => quote.currency).filter(Boolean))];
   return annotateMarketData(out, {
     market: 'us',
@@ -313,7 +334,19 @@ function createYahooProvider({
 
   async function getRank(dir, count = 20) {
     const screenId = dir === 'down' ? 'day_losers' : 'day_gainers';
-    const url = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=${screenId}&count=${count + 5}`;
+    const fields = [
+      'symbol',
+      'shortName',
+      'longName',
+      'currency',
+      'regularMarketPrice',
+      'regularMarketChange',
+      'regularMarketChangePercent',
+      'fullExchangeName',
+      'sector',
+      'industry',
+    ].join(',');
+    const url = `https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?scrIds=${screenId}&count=${count + 5}&fields=${fields}`;
     const payload = JSON.parse(await yahooFetch(url));
     return parseYahooRank(payload, count, { annotateMarketData, num });
   }

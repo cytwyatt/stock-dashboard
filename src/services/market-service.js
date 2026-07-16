@@ -1,5 +1,10 @@
 'use strict';
 
+const { normalizeProfileCode } = require('../core/symbols');
+
+const PROFILE_INDUSTRY_LIMIT = 20;
+const PROFILE_INDUSTRY_CONCURRENCY = 3;
+
 const CACHE_TTL = Object.freeze({
   indices: 15000,
   minuteTX: 30000,
@@ -33,13 +38,41 @@ const cacheKeys = Object.freeze({
   profileRefresh: (code) => `profile-refresh:${code}`,
 });
 
-function immediateEntry(data) {
+function immediateEntry(data, {
+  fetchedAt = Date.now(),
+  stale = false,
+  staleSince = null,
+} = {}) {
   return {
     data,
-    fetchedAt: Date.now(),
-    stale: false,
-    staleSince: null,
+    fetchedAt,
+    stale,
+    staleSince,
   };
+}
+
+function createTaskLimiter(concurrency) {
+  let active = 0;
+  const queue = [];
+
+  function drain() {
+    while (active < concurrency && queue.length) {
+      const { task, resolve, reject } = queue.shift();
+      active++;
+      Promise.resolve()
+        .then(task)
+        .then(resolve, reject)
+        .finally(() => {
+          active--;
+          drain();
+        });
+    }
+  }
+
+  return (task) => new Promise((resolve, reject) => {
+    queue.push({ task, resolve, reject });
+    drain();
+  });
 }
 
 function normalizeMarket(market) {
@@ -83,9 +116,15 @@ function createMarketService(deps) {
     searchStocks,
     getNews,
     getMarketDataMeta,
+    annotateMarketData,
     isTXCode,
     isMarketOpen,
   } = deps;
+
+  // This limiter is scoped to the service singleton, so concurrent HTTP batch
+  // requests share the same upstream budget. Direct profile() calls bypass it
+  // and remain responsive when a rank enrichment batch is in progress.
+  const scheduleProfileIndustry = createTaskLimiter(PROFILE_INDUSTRY_CONCURRENCY);
 
   const service = {
     async indices(market) {
@@ -167,15 +206,16 @@ function createMarketService(deps) {
     },
 
     async profile(code) {
+      const normalizedCode = normalizeProfileCode(code);
       try {
         return await cachedEntry(
-          cacheKeys.profile(code),
+          cacheKeys.profile(normalizedCode),
           CACHE_TTL.profile,
           async () => {
             const candidate = await cachedEntry(
-              cacheKeys.profileRefresh(code),
+              cacheKeys.profileRefresh(normalizedCode),
               CACHE_TTL.profileRefresh,
-              () => getProfile(code)
+              () => getProfile(normalizedCode)
             );
             const meta = getMarketDataMeta(candidate.data);
             const incomplete = meta.coverage && meta.coverage.complete === false;
@@ -199,6 +239,103 @@ function createMarketService(deps) {
       }
     },
 
+    async profileIndustries(codes) {
+      const uniqueCodes = [];
+      const seen = new Set();
+      for (const value of Array.isArray(codes) ? codes : []) {
+        const code = normalizeProfileCode(value);
+        if (!code || seen.has(code)) continue;
+        seen.add(code);
+        uniqueCodes.push(code);
+        if (uniqueCodes.length >= PROFILE_INDUSTRY_LIMIT) break;
+      }
+
+      const loaded = await Promise.all(uniqueCodes.map((code) => scheduleProfileIndustry(async () => {
+        try {
+          const entry = await service.profile(code);
+          const profile = entry.data && typeof entry.data === 'object' ? entry.data : {};
+          const meta = getMarketDataMeta(profile) || {};
+          const coverage = meta.coverage || {};
+          const industry = typeof profile.industry === 'string' && profile.industry.trim()
+            ? profile.industry.trim()
+            : null;
+          const sector = typeof profile.sector === 'string' && profile.sector.trim()
+            ? profile.sector.trim()
+            : null;
+          const hasClassification = !!(industry || sector);
+          let status = 'unavailable';
+          if (entry.stale) status = 'stale';
+          else if (hasClassification) status = 'ok';
+          else if (coverage.industry === false || coverage.complete === false) status = 'partial';
+
+          return {
+            item: {
+              code,
+              industry,
+              sector,
+              classificationBasis: typeof profile.classificationBasis === 'string'
+                ? profile.classificationBasis
+                : null,
+              status,
+              stale: !!entry.stale,
+            },
+            meta,
+            fetchedAt: entry.fetchedAt,
+            staleSince: entry.staleSince || null,
+          };
+        } catch {
+          return {
+            item: {
+              code,
+              industry: null,
+              sector: null,
+              classificationBasis: null,
+              status: 'error',
+              stale: false,
+            },
+            meta: {},
+            fetchedAt: null,
+            staleSince: null,
+          };
+        }
+      })));
+
+      const data = loaded.map((result) => result.item);
+      const counts = { ok: 0, unavailable: 0, partial: 0, error: 0, stale: 0 };
+      for (const item of data) counts[item.status]++;
+      const sources = [...new Set(loaded.map((result) => result.meta.source).filter(Boolean))];
+      const markets = [...new Set(loaded.map((result) => result.meta.market).filter(Boolean))];
+      const timezones = [...new Set(loaded.map((result) => result.meta.timezone).filter(Boolean))];
+      const staleSinceValues = loaded
+        .map((result) => result.staleSince)
+        .filter((value) => Number.isFinite(value));
+      const staleSince = staleSinceValues.length ? Math.min(...staleSinceValues) : null;
+      const fetchedAtValues = loaded
+        .map((result) => result.fetchedAt)
+        .filter((value) => Number.isFinite(value));
+      const fetchedAt = fetchedAtValues.length ? Math.min(...fetchedAtValues) : Date.now();
+
+      annotateMarketData(data, {
+        market: markets.length === 1 ? markets[0] : null,
+        source: sources.join(' / ') || '公司资料',
+        currency: null,
+        timezone: timezones.length === 1 ? timezones[0] : null,
+        adjustmentBasis: 'none',
+        amountUnit: null,
+        coverage: {
+          requested: uniqueCodes.length,
+          withClassification: data.filter((item) => item.industry || item.sector).length,
+          ...counts,
+          complete: counts.partial === 0 && counts.error === 0 && counts.stale === 0,
+        },
+      });
+      return immediateEntry(data, {
+        fetchedAt,
+        stale: counts.stale > 0,
+        staleSince,
+      });
+    },
+
     async search(query) {
       const normalizedQuery = String(query || '').trim().slice(0, 20);
       if (!normalizedQuery) return immediateEntry([]);
@@ -220,5 +357,7 @@ function createMarketService(deps) {
 module.exports = {
   CACHE_TTL,
   cacheKeys,
+  PROFILE_INDUSTRY_LIMIT,
+  PROFILE_INDUSTRY_CONCURRENCY,
   createMarketService,
 };
