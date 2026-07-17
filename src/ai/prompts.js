@@ -107,6 +107,42 @@ function marketReviewSystemPrompt() {
     "keyRisk": ["indices"],
     "executiveSummary": ["indices", "indexHistory"]
   },
+  "synthesisOutlook": {
+    "integratedAssessment": "跨指数趋势、宽度量能、行业风格和可用跨资产信号形成的综合研判，不逐项复述",
+    "summary": "基准情景倾向于某种结构，但仍取决于后续条件确认",
+    "evidenceRefs": {
+      "integratedAssessment": ["indices", "indexHistory", "overview"],
+      "summary": ["indices", "indexHistory"]
+    },
+    "citationRefs": {
+      "integratedAssessment": [],
+      "summary": []
+    },
+    "baseCase": {
+      "bias": "震荡偏强|震荡|震荡偏弱|分化|数据不足",
+      "text": "若可验证市场信号延续，基准情景维持与 bias 一致的判断",
+      "conditions": ["该情景继续成立所需的可验证条件"],
+      "invalidations": ["会使该情景失效的可验证信号"],
+      "evidenceRefs": ["indices", "indexHistory"],
+      "citationRefs": []
+    },
+    "upsideScenario": {
+      "bias": "偏强",
+      "text": "若偏强条件得到确认，该情景的重要性可能上升",
+      "conditions": ["偏强情景得到确认的条件"],
+      "invalidations": ["偏强情景失效的信号"],
+      "evidenceRefs": ["indices", "indexHistory"],
+      "citationRefs": []
+    },
+    "downsideScenario": {
+      "bias": "偏弱",
+      "text": "若偏弱条件得到确认，该情景的风险可能上升",
+      "conditions": ["偏弱情景得到确认的条件"],
+      "invalidations": ["偏弱情景失效的信号"],
+      "evidenceRefs": ["indices", "indexHistory"],
+      "citationRefs": []
+    }
+  },
   "sections": {
     "indexPerformance": [{"text":"...","claimType":"observation|association","evidenceRefs":["indices"],"citationRefs":[]}],
     "breadthLiquidity": [],
@@ -119,16 +155,16 @@ function marketReviewSystemPrompt() {
 }
 
 规则：
-1. 只能使用输入 components、derived、limitations 和 dataWarnings 中的事实与数字。每条必须有 evidenceRefs，且只能引用本次实际存在的组件名。headline、cardSummary、每个 themes 项、keyRisk 和 executiveSummary 也必须通过 prominentEvidenceRefs 逐项绑定证据；themes 的二维引用数组必须与主题数量一致。这些显著文本禁止写任何阿拉伯数字，卡片的精确数值只由服务端 metrics 生成；数字细节只可放在带 refs 的 sections 里。任何缺失指标都要明确降级，不能补零或自行推算。
+1. 只能使用输入 components、derived、limitations 和 dataWarnings 中的事实与数字。每条必须有 evidenceRefs，且只能引用本次实际存在的组件名。headline、cardSummary、每个 themes 项、keyRisk 和 executiveSummary 也必须通过 prominentEvidenceRefs 逐项绑定证据；themes 的二维引用数组必须与主题数量一致。synthesisOutlook 的综合研判、概要和每个情景也必须绑定 evidenceRefs，且只能引用输入 associationEvidenceRefs 中收盘对齐的组件；若引用 news，还必须在对应 citationRefs 中给出有效新闻 ID，并在正文中明确写出来源归属。这些显著文本和整个 synthesisOutlook 禁止写任何阿拉伯数字，卡片的精确数值只由服务端 metrics 生成；数字细节只可放在带 refs 的 sections 里。任何缺失指标都要明确降级，不能补零或自行推算。
 2. observation 只陈述单项事实；association 只描述同步、背离、分化或可能关联，不得使用“导致、推动、驱动、因为、受益于、拖累、催化”等确定因果措辞。association 的所有 evidenceRefs 只能来自输入 associationEvidenceRefs，它们已由服务端校验为同一交易日且处于收盘附近的可比时点；不在该列表的组件只能单独做 observation。reported_cause 只允许出现在 drivers，必须同时引用 news 和至少一个有效 citationRefs，文本中必须显式写“据某来源报道/提及/显示”等来源归属，不能把标题相关性升级成已证实原因。
-3. stance 必须原样使用输入 serverStance，只评价已完成交易日，不是后市预测。nextSessionWatch 只能写可验证的条件、价位、数据或事件观察项，不得给出买卖、仓位或收益承诺。
-4. 必须形成有层次的复盘：指数及多周期位置、市场宽度与成交额比较、行业/风格和代表样本、可用的跨资产信号、带来源的事件线索、风险和下个交易日观察。没有相应数据的市场应明确覆盖边界，不能用涨跌榜样本冒充全市场宽度，也不能用 ETF/宏观代理冒充全市场统计。
+3. stance 必须原样使用输入 serverStance，只评价已完成交易日，绝不能拿它冒充后市预测。synthesisOutlook 是独立的未来一至五个交易日条件式前瞻：baseCase 给出最可能的基准情景，bias 只能取“震荡偏强/震荡/震荡偏弱/分化/数据不足”；upsideScenario.bias 必须是“偏强”，downsideScenario.bias 必须是“偏弱”。三个情景的 text 都必须使用“若/如果/一旦 + 可验证市场信号，情景结果”的结构；逗号前不得只写“继续观察/仔细分析”这类空条件，逗号后必须显式写出与 bias 一致的“震荡偏强/震荡/震荡偏弱/分化/数据不足/偏强/偏弱”，且不得混入反向结果。每个情景必须各有一至三个不重复的 conditions 与 invalidations，且成立条件不能同时作为失效信号；偏强/偏弱情景的 conditions 至少包含一个同向信号，invalidations 至少包含一个反向失效信号。不得输出目标价、任何数字概率（包括中文比例）、收益承诺、买卖、止盈止损或仓位建议，也不得使用“必然、一定会、肯定会、确定将、无悬念、不会改变、板上钉钉”等确定措辞。confidence 只代表证据质量，不是涨跌概率。nextSessionWatch 继续只写可验证的条件、价位、数据或事件观察项。
+4. 必须形成有层次的复盘：指数及多周期位置、市场宽度与成交额比较、行业/风格和代表样本、可用的跨资产信号、带来源的事件线索、风险和下个交易日观察。synthesisOutlook.integratedAssessment 不能逐项复述 sections；它要提炼主线，说明哪些信号相互确认、哪些出现背离，以及判断最脆弱的环节。综合研判必须包含指数/多周期趋势，并尽量覆盖当前实际可用的宽度与流动性、行业与风格、跨资产三类证据；可用类别达到三类时至少覆盖三类，不足时覆盖全部可用类别。没有相应数据的市场应明确覆盖边界，不能用涨跌榜样本冒充全市场宽度，也不能用 ETF/宏观代理冒充全市场统计。
 5. A股 nonUp 是“未上涨（含下跌、平盘与停牌）”；turnoverComparison.mode=previous_trading_day_same_time 时只能称“较前一交易日同期”，previous_trading_day_close 时才可称“较前一交易日全日”。腾讯资金流只能称供应商估算，不能证明涨跌原因。
 6. 美债10年期 yieldPct 是收益率水平、changeBp 是基点变化；VIX、美元、黄金、原油、比特币和美股行业 ETF 都只是同步代理。港股涨跌榜与 A 股涨跌榜都是质量筛选后的代表性样本，不是指数成分贡献。
 7. 服务端已将证据冻结到 reviewDate：复盘日之后的新闻/快照和 stale 可选组件不会输入，news 还经过目标市场相关性筛选。若仍看到 meta.stale=true，不得引用该组件作为当日新鲜事实，必须明确写成旧缓存口径。
-8. risks 写市场风险，不重复 dataWarnings 中的缓存、缺失或时点问题。headline、cardSummary、themes、keyRisk 和 executiveSummary 都不得包含无引用因果断言，且 prominentEvidenceRefs 只能引用 associationEvidenceRefs 中的同日组件。
+8. risks 写市场风险，不重复 dataWarnings 中的缓存、缺失或时点问题。headline、cardSummary、themes、keyRisk、executiveSummary 和 synthesisOutlook 都不得包含无引用因果断言；prominentEvidenceRefs 与 synthesisOutlook 的 evidenceRefs 只能引用 associationEvidenceRefs 中的同日组件。前瞻只能从复盘日收盘前证据构建情景，不得暗示使用了盘后新信息。
 9. 美股涨跌榜与 A/H 股一样只是质量筛选后的代表性样本，不能冒充全市场宽度或指数成分贡献。
-10. 各 section 建议 2至4条；确无证据时返回空数组。文字要具体、专业、信息密度高，避免套话和重复。`;
+10. 各 section 建议 2至4条；确无证据时返回空数组。integratedAssessment 建议 250至500字，summary 建议 80至150字，各情景 text 建议 60至160字。文字要具体、专业、信息密度高，避免套话和重复；前瞻必须明确是可验证、可失效的情景推演，而不是事实陈述或单点预测。`;
 }
 
 module.exports = {

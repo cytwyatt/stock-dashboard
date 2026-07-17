@@ -1574,6 +1574,18 @@ const SUMMARY_EVIDENCE_LABELS = {
 };
 
 const SUMMARY_CONFIDENCE_LABELS = { high: '高', medium: '中', low: '低' };
+const OUTLOOK_BIAS_CLASSES = {
+  '震荡偏强': 'positive',
+  '震荡': 'neutral',
+  '震荡偏弱': 'negative',
+  '分化': 'neutral',
+  '数据不足': 'neutral',
+};
+const OUTLOOK_SCENARIO_LABELS = {
+  base: '基准情景',
+  upside: '偏强情景',
+  downside: '偏弱情景',
+};
 
 function summaryEvidenceLabel(value) {
   const text = summaryText(value);
@@ -1674,6 +1686,84 @@ function renderSummaryConfidence(value) {
   return detail
     ? `<span class="market-summary-confidence"${title}>证据质量 ${escapeHtml(detail)}</span>`
     : '';
+}
+
+function outlookBiasClass(value) {
+  const bias = summaryText(value);
+  return Object.prototype.hasOwnProperty.call(OUTLOOK_BIAS_CLASSES, bias)
+    ? OUTLOOK_BIAS_CLASSES[bias]
+    : 'neutral';
+}
+
+function renderOutlookConfidence(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const level = summaryText(value.level).toLowerCase();
+  const label = SUMMARY_CONFIDENCE_LABELS[level] || '低';
+  const reasons = Array.isArray(value.reasons)
+    ? value.reasons.map(summaryText).filter(Boolean)
+    : [];
+  const title = reasons.length ? ` title="${escapeHtml(reasons.join('；'))}"` : '';
+  return `<span class="market-review-outlook-confidence"${title}>前瞻证据质量 ${escapeHtml(label)} · 非涨跌概率</span>`;
+}
+
+function renderOutlookTextList(items, emptyText) {
+  const values = Array.isArray(items) ? items.map(summaryText).filter(Boolean).slice(0, 3) : [];
+  return values.length
+    ? `<ul>${values.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+    : `<p class="market-summary-empty">${escapeHtml(emptyText)}</p>`;
+}
+
+function renderReviewSynthesisOutlook(value, citationMap) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const integratedAssessment = summaryText(value.integratedAssessment);
+  const scenarios = (Array.isArray(value.scenarios) ? value.scenarios : [])
+    .filter((scenario) => scenario && typeof scenario === 'object'
+      && Object.prototype.hasOwnProperty.call(
+        OUTLOOK_SCENARIO_LABELS, summaryText(scenario.key),
+      )
+      && summaryText(scenario.text));
+  if (!integratedAssessment || !scenarios.length) return '';
+  const scenarioByKey = new Map(scenarios.map((scenario) => [summaryText(scenario.key), scenario]));
+  const orderedScenarios = ['base', 'upside', 'downside']
+    .map((key) => scenarioByKey.get(key))
+    .filter(Boolean);
+  const horizon = summaryText(value.horizon) || '短期';
+  const integratedRefs = value.evidenceRefs && value.evidenceRefs.integratedAssessment;
+  const outlookConfidence = renderOutlookConfidence(value.confidence);
+
+  return `<section class="market-review-synthesis" aria-labelledby="marketReviewSynthesisTitle">
+    <div class="market-review-synthesis-head">
+      <h3 id="marketReviewSynthesisTitle">综合研判与前瞻</h3>
+      <span>${escapeHtml(horizon)}</span>
+    </div>
+    <div class="market-review-integrated">
+      <h4>跨数据综合判断</h4>
+      <p>${escapeHtml(integratedAssessment)}</p>
+      ${renderSummaryEvidenceRefs(integratedRefs)}
+      ${renderReviewCitationRefs(value.citationRefs && value.citationRefs.integratedAssessment, citationMap)}
+    </div>
+    ${outlookConfidence ? `<div class="market-review-outlook-meta">${outlookConfidence}</div>` : ''}
+    <div class="market-review-scenarios">${orderedScenarios.map((scenario) => {
+      const key = summaryText(scenario.key);
+      const bias = key === 'base'
+        && Object.prototype.hasOwnProperty.call(OUTLOOK_BIAS_CLASSES, summaryText(scenario.bias))
+        ? summaryText(scenario.bias)
+        : '';
+      return `<article class="market-review-scenario ${key}">
+        <div class="market-review-scenario-head">
+          <h4>${escapeHtml(OUTLOOK_SCENARIO_LABELS[key])}</h4>
+          ${bias ? `<span class="market-review-outlook-bias ${outlookBiasClass(bias)}">${escapeHtml(bias)}</span>` : ''}
+        </div>
+        <p>${escapeHtml(summaryText(scenario.text))}</p>
+        <div class="market-review-scenario-signals">
+          <div><strong>成立条件</strong>${renderOutlookTextList(scenario.conditions, '暂无可验证条件。')}</div>
+          <div><strong>失效信号</strong>${renderOutlookTextList(scenario.invalidations, '暂无失效信号。')}</div>
+        </div>
+        ${renderSummaryEvidenceRefs(scenario.evidenceRefs)}
+        ${renderReviewCitationRefs(scenario.citationRefs, citationMap)}
+      </article>`;
+    }).join('')}</div>
+  </section>`;
 }
 
 function setSummaryNotice(text, type = 'warning') {
@@ -1810,6 +1900,7 @@ function renderMarketReviewDetail(data) {
     || summaryText(card.headline)
     || '本次复盘暂无执行摘要。';
   const executiveEvidence = detail.evidenceRefs && detail.evidenceRefs.executiveSummary;
+  const synthesisOutlook = detail.synthesisOutlook;
   const citations = Array.isArray(data.citations) ? data.citations : [];
   const citationMap = citationsById(citations);
   const sections = (Array.isArray(detail.sections) ? detail.sections : [])
@@ -1832,6 +1923,7 @@ function renderMarketReviewDetail(data) {
       ${renderSummaryEvidenceRefs(executiveEvidence)}
     </section>
     ${renderSummaryWarnings(data.dataWarnings, citationMap)}
+    ${renderReviewSynthesisOutlook(synthesisOutlook, citationMap)}
     <div class="market-review-sections">${sections.length
       ? sections.map((section) => `<section class="market-review-section">
           <h3>${escapeHtml(summaryText(section.title) || summaryText(section.key) || '复盘要点')}</h3>
@@ -1886,10 +1978,21 @@ function renderMarketSummary(data) {
     ? card.themes.map(summaryText).filter(Boolean).slice(0, 5)
     : [];
   const keyRisk = summaryText(card.keyRisk);
+  const outlook = card.outlook && typeof card.outlook === 'object' && !Array.isArray(card.outlook)
+    ? card.outlook
+    : {};
+  const outlookSummary = summaryText(outlook.summary);
+  const outlookHorizon = summaryText(outlook.horizon);
+  const outlookBias = Object.prototype.hasOwnProperty.call(
+    OUTLOOK_BIAS_CLASSES, summaryText(outlook.bias),
+  )
+    ? summaryText(outlook.bias)
+    : '';
   const generatedAt = shortAsOf(data.generatedAt, data._meta && data._meta.timezone);
   const warnings = normalizeSummaryItems(data.dataWarnings);
   const nextReviewStatus = summaryText(data.nextReviewStatus).toLowerCase();
   const status = summaryText(data.status).toLowerCase();
+  const citationMap = citationsById(data.citations);
   marketReviewNeedsPolling = status === 'retry_pending'
     || nextReviewStatus === 'scheduled'
     || nextReviewStatus === 'retry_pending';
@@ -1919,6 +2022,18 @@ function renderMarketSummary(data) {
       ${renderReviewMetrics(card.metrics)}
       ${themes.length ? `<div class="market-review-themes" aria-label="复盘主题">${themes
         .map((theme) => `<span>${escapeHtml(theme)}</span>`).join('')}</div>` : ''}
+      ${outlookSummary ? `<div class="market-review-outlook-preview">
+        <div class="market-review-outlook-preview-head">
+          <strong>综合研判 · 短期前瞻</strong>
+          <span class="market-review-outlook-preview-meta">
+            ${outlookBias ? `<span class="market-review-outlook-bias ${outlookBiasClass(outlookBias)}">${escapeHtml(outlookBias)}</span>` : ''}
+            ${outlookHorizon ? `<span>${escapeHtml(outlookHorizon)}</span>` : ''}
+          </span>
+        </div>
+        <p>${escapeHtml(outlookSummary)}</p>
+        ${renderSummaryEvidenceRefs(outlook.evidenceRefs)}
+        ${renderReviewCitationRefs(outlook.citationRefs, citationMap)}
+      </div>` : ''}
       ${keyRisk ? `<div class="market-review-risk"><strong>关键风险</strong><span>${escapeHtml(keyRisk)}</span>${renderSummaryEvidenceRefs(card.evidenceRefs && card.evidenceRefs.keyRisk)}</div>` : ''}
       ${nextReviewStatus === 'unconfigured' ? `<div class="market-review-config-alert">
         <span>当前模型未配置；这份历史复盘仍可查看，后续每日复盘已暂停。</span>
