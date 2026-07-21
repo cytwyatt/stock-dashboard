@@ -1555,6 +1555,7 @@ function summaryStanceClass(stance) {
 const SUMMARY_CLAIM_LABELS = {
   observation: '事实',
   association: '关联',
+  analysis: '模型研判',
   causal: '事件归因',
   reported_cause: '报道归因',
 };
@@ -1733,11 +1734,11 @@ function renderReviewSynthesisOutlook(value, citationMap) {
 
   return `<section class="market-review-synthesis" aria-labelledby="marketReviewSynthesisTitle">
     <div class="market-review-synthesis-head">
-      <h3 id="marketReviewSynthesisTitle">综合研判与前瞻</h3>
+      <h3 id="marketReviewSynthesisTitle">模型研判与前瞻</h3>
       <span>${escapeHtml(horizon)}</span>
     </div>
     <div class="market-review-integrated">
-      <h4>跨数据综合判断</h4>
+      <h4>模型综合判断</h4>
       <p>${escapeHtml(integratedAssessment)}</p>
       ${renderSummaryEvidenceRefs(integratedRefs)}
       ${renderReviewCitationRefs(value.citationRefs && value.citationRefs.integratedAssessment, citationMap)}
@@ -2024,7 +2025,7 @@ function renderMarketSummary(data) {
         .map((theme) => `<span>${escapeHtml(theme)}</span>`).join('')}</div>` : ''}
       ${outlookSummary ? `<div class="market-review-outlook-preview">
         <div class="market-review-outlook-preview-head">
-          <strong>综合研判 · 短期前瞻</strong>
+          <strong>模型研判 · 短期前瞻</strong>
           <span class="market-review-outlook-preview-meta">
             ${outlookBias ? `<span class="market-review-outlook-bias ${outlookBiasClass(outlookBias)}">${escapeHtml(outlookBias)}</span>` : ''}
             ${outlookHorizon ? `<span>${escapeHtml(outlookHorizon)}</span>` : ''}
