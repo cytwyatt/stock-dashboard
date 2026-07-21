@@ -44,7 +44,7 @@ const SECTION_DEFS = Object.freeze([
 ]);
 const SECTION_KEYS = new Set(SECTION_DEFS.map(([key]) => key));
 const VALID_STANCES = new Set(['偏强', '中性', '偏弱', '分化', '数据不足']);
-const VALID_CLAIM_TYPES = new Set(['observation', 'association', 'reported_cause']);
+const VALID_CLAIM_TYPES = new Set(['observation', 'association', 'analysis', 'reported_cause']);
 const OUTLOOK_HORIZON = '未来一至五个交易日';
 const VALID_OUTLOOK_BIASES = new Set(['震荡偏强', '震荡', '震荡偏弱', '分化', '数据不足']);
 const OUTLOOK_SCENARIO_DEFS = Object.freeze([
@@ -59,29 +59,10 @@ const OUTLOOK_EVIDENCE_GROUPS = Object.freeze([
   ['macroProxies'],
 ]);
 const CAUSAL_LANGUAGE = /(?:导致|推动|驱动|引发|造成|促使|使得|源于|源自|因为|由于|之所以|受益于|得益于|归因于|归功于|带动|带领|拖累|提振|压制|催化|助推|贡献|受.{0,12}影响|(?:提供|形成|构成).{0,8}支撑|支撑(?:了|着)?(?:市场|指数|股价|行情|上涨|反弹|走强)|due\s+to|caused?|driven\s+by|led\s+to|result(?:ed)?\s+in)/i;
+const EXTERNAL_EVENT_LANGUAGE = /(?:政策|新闻|消息|事件|公告|财报|盈利|数据公布|央行|人民银行|美联储|监管|政府)/i;
 const REPORTED_ATTRIBUTION_LANGUAGE = /(?:据[^，。；;]{1,48}(?:报道|提及|指出|披露|显示|称)|(?:报道称|报道提及|公告显示|数据显示|消息称|媒体提及|新闻提及))/;
-const OUTLOOK_FORBIDDEN_LANGUAGE = /(?:必然|必定|一定会|肯定会|确定(?:会|将)|毫无疑问|无悬念|不会(?:再)?改变|不可改变|板上钉钉|铁定|注定|必涨|必跌|(?:将|会)[^，。；;]{0,12}(?:上涨|下跌|上扬|下挫|上行|下行|走高|走低|走强|走弱|反弹|回落)|(?:结论|方向|走势)(?:已经|已)?(?:十分|非常|完全)?(?:形成|呈现)?(?:明确|清晰|确定)(?:的)?(?:结论|信号)?|(?:格局|趋势|态势)(?:已经|已)?(?:十分|非常|完全)?(?:形成|呈现)?(?:确立|明确|清晰|确定)|稳赚|保证收益|收益承诺|目标价|买入|卖出|加仓|减仓|增持|减持|满仓|空仓|仓位|持仓|止损|止盈|做多|做空|抄底|追涨|建议投资者|上涨概率|下跌概率|胜率|[一二三四五六七八九十]成(?:概率|可能性)?|百分之[一二三四五六七八九十百零两]+|明天|明日|后天)/i;
-const OUTLOOK_CONDITIONAL_LANGUAGE = /(?:若|如果|取决于|能否|除非|一旦|在.{0,18}前提下)/;
-const OUTLOOK_DIRECTION_LANGUAGE = /(?:上涨|下跌|上扬|下挫|上行|下行|走高|走低|走强|走弱|上攻|下探|反弹|回落|强势|弱势|偏强|偏弱|涨|跌)/;
+const OUTLOOK_FORBIDDEN_LANGUAGE = /(?:必然|必定|一定会|肯定会|毫无疑问|无悬念|不会(?:再)?改变|不可改变|板上钉钉|铁定|注定|必涨|必跌|稳赚|保证收益|收益承诺|目标价|买入|卖出|加仓|减仓|增持|减持|满仓|空仓|仓位|持仓|止损|止盈|做多|做空|抄底|追涨|建议投资者|上涨概率|下跌概率|胜率|\d{1,3}\s*%\s*(?:概率|可能性)|[一二三四五六七八九十]成(?:概率|可能性)?|百分之[一二三四五六七八九十百零两]+(?:的)?(?:概率|可能性))/i;
 const OUTLOOK_VERIFIABLE_SIGNAL_LANGUAGE = /(?:指数|价格|走势|趋势|结构|成交|量能|宽度|涨跌|行业|板块|风格|资金|波动|风险|利率|汇率|收益率|宏观|代理|信号|数据|盈利|估值|事件|政策|新闻|阶段表现|市场内部)/;
-const UPSIDE_SCENARIO_LANGUAGE = /(?:改善|增强|偏强|强势|走强|上行|修复|扩散|回升|恢复|回稳|企稳|放大|增加|突破)/;
-const DOWNSIDE_SCENARIO_LANGUAGE = /(?:转弱|走弱|偏弱|弱势|下行|回落|恶化|收缩|承压|压力扩大|下降|减弱|未能|未获|缺少|背离|受阻|中断)/;
-const UPSIDE_OUTCOME_LANGUAGE = /偏强/;
-const DOWNSIDE_OUTCOME_LANGUAGE = /偏弱/;
-const BASE_CASE_BIAS_LANGUAGE = Object.freeze({
-  '震荡偏强': /震荡偏强/,
-  '震荡': /震荡(?!偏[强弱])/,
-  '震荡偏弱': /震荡偏弱/,
-  '分化': /分化/,
-  '数据不足': /(?:数据不足|证据不足|信息不足|不预设)/,
-});
-const BASE_CASE_REVERSE_LANGUAGE = Object.freeze({
-  '震荡偏强': /震荡偏弱/,
-  '震荡': /震荡偏[强弱]/,
-  '震荡偏弱': /震荡偏强/,
-  '分化': /(?:震荡偏强|震荡偏弱)/,
-  '数据不足': /(?:震荡偏强|震荡偏弱|方向明确)/,
-});
 const MARKET_NEWS_PATTERNS = Object.freeze({
   cn: /(?:A股|沪指|上证|深证|深成指|创业板|科创板|北交所|沪深|两市|沪市|深市|人民币|中国央行|人民银行|证监会)/i,
   hk: /(?:港股|香港股市|恒生|恒指|国企指数|恒生科技|港交所|联交所|南向资金|港元)/i,
@@ -141,8 +122,10 @@ function requireNonCausalText(value, field, maxLength) {
 }
 
 function requireProminentText(value, field, maxLength) {
-  const text = requireNonCausalText(value, field, maxLength);
-  if (/\d/.test(text)) throw new Error(`AI 盘后复盘 ${field} 含未经服务端校验的数字`);
+  const text = requireText(value, field, maxLength);
+  if (OUTLOOK_FORBIDDEN_LANGUAGE.test(text)) {
+    throw new Error(`AI 盘后复盘 ${field} 含确定性承诺、概率或投资建议`);
+  }
   return text;
 }
 
@@ -150,39 +133,15 @@ function requireOutlookText(value, field, maxLength, minLength = 1) {
   if (typeof value !== 'string') throw new Error(`AI 盘后复盘 ${field} 必须是文本`);
   const text = requireProminentText(value, field, maxLength);
   if (text.length < minLength) throw new Error(`AI 盘后复盘 ${field} 信息量不足`);
-  if (OUTLOOK_FORBIDDEN_LANGUAGE.test(text)) {
-    throw new Error(`AI 盘后复盘 ${field} 含确定性预测或投资建议`);
-  }
   return text;
 }
 
-function requireConditionalOutlookText(value, field, maxLength, minLength = 1) {
+function requireMarketOutlookText(value, field, maxLength, minLength = 1) {
   const text = requireOutlookText(value, field, maxLength, minLength);
-  if (!OUTLOOK_CONDITIONAL_LANGUAGE.test(text)) {
-    throw new Error(`AI 盘后复盘 ${field} 缺少条件式表述`);
-  }
   if (!OUTLOOK_VERIFIABLE_SIGNAL_LANGUAGE.test(text)) {
     throw new Error(`AI 盘后复盘 ${field} 缺少可验证市场信号`);
   }
-  const directCondition = text.match(/(?:^|[。；;!?！？])(?:若|如果|一旦|除非)([^，,。；;!?！？]{1,120})/);
-  if (directCondition && !OUTLOOK_VERIFIABLE_SIGNAL_LANGUAGE.test(directCondition[1])) {
-    throw new Error(`AI 盘后复盘 ${field} 的条件不是可验证市场信号`);
-  }
-  for (const sentence of text.split(/[。；;!?！？]/).filter(Boolean)) {
-    if (OUTLOOK_DIRECTION_LANGUAGE.test(sentence)
-        && !OUTLOOK_CONDITIONAL_LANGUAGE.test(sentence)) {
-      throw new Error(`AI 盘后复盘 ${field} 含无条件方向断言`);
-    }
-  }
   return text;
-}
-
-function scenarioOutcomeText(text, field) {
-  const match = text.match(/^(?:若|如果|一旦)([^，,]{2,160})[，,](.{8,})$/);
-  if (!match || !OUTLOOK_VERIFIABLE_SIGNAL_LANGUAGE.test(match[1])) {
-    throw new Error(`AI 盘后复盘 synthesisOutlook.${field}.text 缺少“可验证条件，情景结果”结构`);
-  }
-  return match[2];
 }
 
 function parseOutlookTextList(value, field, { minItems = 1, maxItems = 3 } = {}) {
@@ -232,20 +191,16 @@ function validateOutlookNewsRefs({ evidenceRefs, citationRefs, text, field }) {
   if (!citesNews && citationRefs.length) {
     throw new Error(`AI 盘后复盘 ${field} 的新闻引用缺少 news 证据`);
   }
+  if (!citesNews && CAUSAL_LANGUAGE.test(text) && EXTERNAL_EVENT_LANGUAGE.test(text)) {
+    throw new Error(`AI 盘后复盘 ${field} 的事件归因缺少新闻证据与来源`);
+  }
 }
 
 function validateIntegratedEvidenceCoverage(refs, alignedEvidenceRefs) {
-  const availableGroups = OUTLOOK_EVIDENCE_GROUPS
-    .filter((group) => group.some((ref) => alignedEvidenceRefs.has(ref)));
-  const referencedGroups = availableGroups
-    .filter((group) => group.some((ref) => refs.includes(ref)));
   const trendGroup = OUTLOOK_EVIDENCE_GROUPS[0];
   if (trendGroup.some((ref) => alignedEvidenceRefs.has(ref))
       && !trendGroup.some((ref) => refs.includes(ref))) {
     throw new Error('AI 盘后复盘综合研判缺少指数趋势证据');
-  }
-  if (referencedGroups.length < Math.min(3, availableGroups.length)) {
-    throw new Error('AI 盘后复盘综合研判未覆盖足够的证据类别');
   }
 }
 
@@ -275,21 +230,14 @@ function parseOutlookScenario(
   field,
   alignedEvidenceRefs,
   allowedCitationRefs,
-  {
-    expectedBias = null,
-    outcomePattern = null,
-    reverseOutcomePattern = null,
-    conditionPattern = null,
-    invalidationPattern = null,
-  } = {},
+  { expectedBias = null } = {},
 ) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`AI 盘后复盘缺少 synthesisOutlook.${field}`);
   }
-  const text = requireConditionalOutlookText(
+  const text = requireMarketOutlookText(
     value.text, `synthesisOutlook.${field}.text`, 360, 30,
   );
-  const outcome = scenarioOutcomeText(text, field);
   const conditions = parseOutlookTextList(
     value.conditions, `synthesisOutlook.${field}.conditions`,
   );
@@ -321,24 +269,6 @@ function parseOutlookScenario(
       || (!expectedBias && !VALID_OUTLOOK_BIASES.has(bias))) {
     throw new Error(`AI 盘后复盘 synthesisOutlook.${field}.bias 非法`);
   }
-  if (outcomePattern && (!outcomePattern.test(outcome)
-      || (reverseOutcomePattern && reverseOutcomePattern.test(outcome)))) {
-    throw new Error(`AI 盘后复盘 synthesisOutlook.${field} 与情景方向不一致`);
-  }
-  if (conditionPattern && !conditions.some((item) => conditionPattern.test(item))) {
-    throw new Error(`AI 盘后复盘 synthesisOutlook.${field}.conditions 与情景方向不一致`);
-  }
-  if (invalidationPattern && !invalidations.some((item) => invalidationPattern.test(item))) {
-    throw new Error(`AI 盘后复盘 synthesisOutlook.${field}.invalidations 缺少反向失效信号`);
-  }
-  if (!expectedBias) {
-    const biasPattern = BASE_CASE_BIAS_LANGUAGE[bias];
-    const reverseBiasPattern = BASE_CASE_REVERSE_LANGUAGE[bias];
-    if (!biasPattern || !biasPattern.test(outcome)
-        || (reverseBiasPattern && reverseBiasPattern.test(outcome))) {
-      throw new Error(`AI 盘后复盘 synthesisOutlook.${field} 与基准偏向不一致`);
-    }
-  }
   const scenario = {
     bias,
     text,
@@ -350,6 +280,47 @@ function parseOutlookScenario(
   return scenario;
 }
 
+function parseSynthesisNarrative(
+  value,
+  field,
+  alignedEvidenceRefs,
+  allowedCitationRefs,
+  { summary = false } = {},
+) {
+  const evidenceSpec = value && value.evidenceRefs && typeof value.evidenceRefs === 'object'
+    && !Array.isArray(value.evidenceRefs)
+    ? value.evidenceRefs
+    : {};
+  const citationSpec = value && value.citationRefs && typeof value.citationRefs === 'object'
+    && !Array.isArray(value.citationRefs)
+    ? value.citationRefs
+    : {};
+  const text = summary
+    ? requireMarketOutlookText(value && value[field], `synthesisOutlook.${field}`, 320, 30)
+    : requireOutlookText(value && value[field], `synthesisOutlook.${field}`, 1400, 80);
+  const evidenceRefs = parseEvidenceRefs(
+    evidenceSpec[field],
+    `synthesisOutlook.evidenceRefs.${field}`,
+    alignedEvidenceRefs,
+    6,
+    1,
+  );
+  if (!summary) validateIntegratedEvidenceCoverage(evidenceRefs, alignedEvidenceRefs);
+  const citationRefs = parseCitationRefs(
+    citationSpec[field],
+    `synthesisOutlook.citationRefs.${field}`,
+    allowedCitationRefs,
+    { required: evidenceRefs.includes('news') },
+  );
+  validateOutlookNewsRefs({
+    evidenceRefs,
+    citationRefs,
+    text,
+    field: `synthesisOutlook.${field}`,
+  });
+  return { text, evidenceRefs, citationRefs };
+}
+
 function parseSynthesisOutlook(value, alignedEvidenceRefs, allowedCitationRefs) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('AI 盘后复盘缺少 synthesisOutlook');
@@ -357,102 +328,126 @@ function parseSynthesisOutlook(value, alignedEvidenceRefs, allowedCitationRefs) 
   if (!alignedEvidenceRefs.size) {
     throw new Error('AI 盘后复盘 synthesisOutlook 缺少收盘对齐证据');
   }
-  if (!value.evidenceRefs || typeof value.evidenceRefs !== 'object'
-      || Array.isArray(value.evidenceRefs)) {
-    throw new Error('AI 盘后复盘缺少 synthesisOutlook.evidenceRefs');
-  }
-  const citationSpec = value.citationRefs && typeof value.citationRefs === 'object'
-    && !Array.isArray(value.citationRefs)
-    ? value.citationRefs
-    : {};
-  const nonNewsAlignedCount = [...alignedEvidenceRefs].filter((ref) => ref !== 'news').length;
-  const integratedMinRefs = Math.max(1, Math.min(3, nonNewsAlignedCount));
-  const summaryMinRefs = Math.max(1, Math.min(2, nonNewsAlignedCount));
-  const integratedAssessment = requireOutlookText(
-    value.integratedAssessment, 'synthesisOutlook.integratedAssessment', 1400, 80,
+  const integrated = parseSynthesisNarrative(
+    value, 'integratedAssessment', alignedEvidenceRefs, allowedCitationRefs,
   );
-  const summary = requireConditionalOutlookText(
-    value.summary, 'synthesisOutlook.summary', 320, 30,
+  const summary = parseSynthesisNarrative(
+    value, 'summary', alignedEvidenceRefs, allowedCitationRefs, { summary: true },
   );
-  const integratedEvidenceRefs = parseEvidenceRefs(
-    value.evidenceRefs.integratedAssessment,
-    'synthesisOutlook.evidenceRefs.integratedAssessment',
-    alignedEvidenceRefs,
-    6,
-    integratedMinRefs,
-  );
-  validateIntegratedEvidenceCoverage(integratedEvidenceRefs, alignedEvidenceRefs);
-  const summaryEvidenceRefs = parseEvidenceRefs(
-    value.evidenceRefs.summary,
-    'synthesisOutlook.evidenceRefs.summary',
-    alignedEvidenceRefs,
-    6,
-    summaryMinRefs,
-  );
-  const integratedCitationRefs = parseCitationRefs(
-    citationSpec.integratedAssessment,
-    'synthesisOutlook.citationRefs.integratedAssessment',
-    allowedCitationRefs,
-    { required: integratedEvidenceRefs.includes('news') },
-  );
-  const summaryCitationRefs = parseCitationRefs(
-    citationSpec.summary,
-    'synthesisOutlook.citationRefs.summary',
-    allowedCitationRefs,
-    { required: summaryEvidenceRefs.includes('news') },
-  );
-  validateOutlookNewsRefs({
-    evidenceRefs: integratedEvidenceRefs,
-    citationRefs: integratedCitationRefs,
-    text: integratedAssessment,
-    field: 'synthesisOutlook.integratedAssessment',
-  });
-  validateOutlookNewsRefs({
-    evidenceRefs: summaryEvidenceRefs,
-    citationRefs: summaryCitationRefs,
-    text: summary,
-    field: 'synthesisOutlook.summary',
-  });
   const baseCase = parseOutlookScenario(
     value.baseCase, 'baseCase', alignedEvidenceRefs, allowedCitationRefs,
   );
   const upsideScenario = parseOutlookScenario(
     value.upsideScenario, 'upsideScenario', alignedEvidenceRefs, allowedCitationRefs,
-    {
-      expectedBias: '偏强',
-      outcomePattern: UPSIDE_OUTCOME_LANGUAGE,
-      reverseOutcomePattern: DOWNSIDE_OUTCOME_LANGUAGE,
-      conditionPattern: UPSIDE_SCENARIO_LANGUAGE,
-      invalidationPattern: DOWNSIDE_SCENARIO_LANGUAGE,
-    },
+    { expectedBias: '偏强' },
   );
   const downsideScenario = parseOutlookScenario(
     value.downsideScenario, 'downsideScenario', alignedEvidenceRefs, allowedCitationRefs,
-    {
-      expectedBias: '偏弱',
-      outcomePattern: DOWNSIDE_OUTCOME_LANGUAGE,
-      reverseOutcomePattern: UPSIDE_OUTCOME_LANGUAGE,
-      conditionPattern: DOWNSIDE_SCENARIO_LANGUAGE,
-      invalidationPattern: UPSIDE_SCENARIO_LANGUAGE,
-    },
+    { expectedBias: '偏弱' },
   );
   if (new Set([baseCase.text, upsideScenario.text, downsideScenario.text]).size !== 3) {
     throw new Error('AI 盘后复盘 synthesisOutlook 情景正文重复');
   }
   return {
-    integratedAssessment,
-    summary,
+    integratedAssessment: integrated.text,
+    summary: summary.text,
     evidenceRefs: {
-      integratedAssessment: integratedEvidenceRefs,
-      summary: summaryEvidenceRefs,
+      integratedAssessment: integrated.evidenceRefs,
+      summary: summary.evidenceRefs,
     },
     citationRefs: {
-      integratedAssessment: integratedCitationRefs,
-      summary: summaryCitationRefs,
+      integratedAssessment: integrated.citationRefs,
+      summary: summary.citationRefs,
     },
     baseCase,
     upsideScenario,
     downsideScenario,
+  };
+}
+
+function parseSynthesisOutlookWithFallback(
+  value,
+  alignedEvidenceRefs,
+  allowedCitationRefs,
+  fallback,
+  validationWarnings,
+) {
+  if (!fallback) return parseSynthesisOutlook(value, alignedEvidenceRefs, allowedCitationRefs);
+  const safeFallback = parseSynthesisOutlook(fallback, alignedEvidenceRefs, allowedCitationRefs);
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const parseOrFallback = (field, parse, fallbackValue) => {
+    try {
+      return parse();
+    } catch (error) {
+      validationWarnings.push({
+        code: 'synthesis_field_fallback',
+        field,
+        reason: String(error && error.message || ''),
+      });
+      return fallbackValue;
+    }
+  };
+  const integrated = parseOrFallback(
+    'integratedAssessment',
+    () => parseSynthesisNarrative(
+      source, 'integratedAssessment', alignedEvidenceRefs, allowedCitationRefs,
+    ),
+    {
+      text: safeFallback.integratedAssessment,
+      evidenceRefs: safeFallback.evidenceRefs.integratedAssessment,
+      citationRefs: safeFallback.citationRefs.integratedAssessment,
+    },
+  );
+  const summary = parseOrFallback(
+    'summary',
+    () => parseSynthesisNarrative(
+      source, 'summary', alignedEvidenceRefs, allowedCitationRefs, { summary: true },
+    ),
+    {
+      text: safeFallback.summary,
+      evidenceRefs: safeFallback.evidenceRefs.summary,
+      citationRefs: safeFallback.citationRefs.summary,
+    },
+  );
+  const scenarios = {};
+  for (const [field, expectedBias] of [
+    ['baseCase', null],
+    ['upsideScenario', '偏强'],
+    ['downsideScenario', '偏弱'],
+  ]) {
+    scenarios[field] = parseOrFallback(
+      field,
+      () => parseOutlookScenario(
+        source[field], field, alignedEvidenceRefs, allowedCitationRefs,
+        { expectedBias },
+      ),
+      safeFallback[field],
+    );
+  }
+  const seenScenarioText = new Set();
+  for (const field of ['baseCase', 'upsideScenario', 'downsideScenario']) {
+    if (seenScenarioText.has(scenarios[field].text)) {
+      scenarios[field] = safeFallback[field];
+      validationWarnings.push({
+        code: 'synthesis_field_fallback',
+        field,
+        reason: 'AI 盘后复盘 synthesisOutlook 情景正文重复',
+      });
+    }
+    seenScenarioText.add(scenarios[field].text);
+  }
+  return {
+    integratedAssessment: integrated.text,
+    summary: summary.text,
+    evidenceRefs: {
+      integratedAssessment: integrated.evidenceRefs,
+      summary: summary.evidenceRefs,
+    },
+    citationRefs: {
+      integratedAssessment: integrated.citationRefs,
+      summary: summary.citationRefs,
+    },
+    ...scenarios,
   };
 }
 
@@ -497,9 +492,15 @@ function parseReviewItems(
       }
       const text = claimType === 'reported_cause'
         ? requireText(item.text, `${sectionKey}[${index}].text`, 260)
-        : requireNonCausalText(item.text, `${sectionKey}[${index}].text`, 260);
+        : claimType === 'analysis' || claimType === 'association'
+          ? requireProminentText(item.text, `${sectionKey}[${index}].text`, 260)
+          : requireNonCausalText(item.text, `${sectionKey}[${index}].text`, 260);
       if (claimType === 'reported_cause' && !REPORTED_ATTRIBUTION_LANGUAGE.test(text)) {
         throw new Error(`AI 盘后复盘 ${sectionKey}[${index}] 事件归因缺少明确来源归属措辞`);
+      }
+      if (claimType !== 'reported_cause'
+          && CAUSAL_LANGUAGE.test(text) && EXTERNAL_EVENT_LANGUAGE.test(text)) {
+        throw new Error(`AI 盘后复盘 ${sectionKey}[${index}] 事件归因缺少新闻证据与来源`);
       }
       parsedItems.push({ text, claimType, evidenceRefs, citationRefs });
     } catch (error) {
@@ -546,6 +547,72 @@ function parseProminentFields(parsed, aligned) {
   };
 }
 
+function parseProminentFieldsWithFallback(parsed, aligned, fallback, validationWarnings) {
+  if (!fallback) return parseProminentFields(parsed, aligned);
+  const safeFallback = parseProminentFields(fallback, aligned);
+  const rawRefs = parsed.prominentEvidenceRefs
+    && typeof parsed.prominentEvidenceRefs === 'object'
+    && !Array.isArray(parsed.prominentEvidenceRefs)
+    ? parsed.prominentEvidenceRefs
+    : {};
+  const result = {
+    stance: VALID_STANCES.has(parsed.stance) ? parsed.stance : safeFallback.stance,
+    prominentEvidenceRefs: {},
+  };
+  const parseOrFallback = (field, parse, fallbackValue) => {
+    try {
+      return parse();
+    } catch (error) {
+      validationWarnings.push({
+        code: 'prominent_field_fallback',
+        field,
+        reason: String(error && error.message || ''),
+      });
+      return fallbackValue;
+    }
+  };
+  for (const [field, refField, maxLength] of [
+    ['headline', 'headline', 160],
+    ['cardSummary', 'cardSummary', 300],
+    ['keyRisk', 'keyRisk', 180],
+    ['executiveSummary', 'executiveSummary', 1200],
+  ]) {
+    const parsedField = parseOrFallback(field, () => ({
+      text: requireProminentText(parsed[field], field, maxLength),
+      refs: parseEvidenceRefs(
+        rawRefs[refField], `prominentEvidenceRefs.${refField}`, aligned,
+      ),
+    }), {
+      text: safeFallback[field],
+      refs: safeFallback.prominentEvidenceRefs[refField],
+    });
+    result[field] = parsedField.text;
+    result.prominentEvidenceRefs[refField] = parsedField.refs;
+  }
+  const parsedThemes = parseOrFallback('themes', () => {
+    const themes = (Array.isArray(parsed.themes) ? parsed.themes : [])
+      .slice(0, 4)
+      .map((item, index) => requireProminentText(item, `themes[${index}]`, 30));
+    if (themes.length < 2) throw new Error('AI 盘后复盘至少需要两个主题');
+    const themeRefs = Array.isArray(rawRefs.themes) ? rawRefs.themes : [];
+    if (themeRefs.length !== themes.length) {
+      throw new Error('AI 盘后复盘 prominentEvidenceRefs.themes 与主题数量不一致');
+    }
+    return {
+      themes,
+      refs: themeRefs.map((refs, index) => parseEvidenceRefs(
+        refs, `prominentEvidenceRefs.themes[${index}]`, aligned,
+      )),
+    };
+  }, {
+    themes: safeFallback.themes,
+    refs: safeFallback.prominentEvidenceRefs.themes,
+  });
+  result.themes = parsedThemes.themes;
+  result.prominentEvidenceRefs.themes = parsedThemes.refs;
+  return result;
+}
+
 function parseMarketReview(content, {
   allowedEvidenceRefs = [],
   allowedCitationRefs = [],
@@ -568,22 +635,16 @@ function parseMarketReview(content, {
     ? associationEvidenceRefs
     : new Set(associationEvidenceRefs);
   const validationWarnings = [];
-  let prominent;
-  try {
-    prominent = parseProminentFields(parsed, aligned);
-  } catch (error) {
-    if (!prominentFallback) throw error;
-    prominent = parseProminentFields(prominentFallback, aligned);
-    validationWarnings.push({ code: 'prominent_fallback' });
-  }
-  let synthesisOutlook;
-  try {
-    synthesisOutlook = parseSynthesisOutlook(parsed.synthesisOutlook, aligned, citations);
-  } catch (error) {
-    if (!synthesisFallback) throw error;
-    synthesisOutlook = parseSynthesisOutlook(synthesisFallback, aligned, citations);
-    validationWarnings.push({ code: 'synthesis_fallback' });
-  }
+  const prominent = parseProminentFieldsWithFallback(
+    parsed, aligned, prominentFallback, validationWarnings,
+  );
+  const synthesisOutlook = parseSynthesisOutlookWithFallback(
+    parsed.synthesisOutlook,
+    aligned,
+    citations,
+    synthesisFallback,
+    validationWarnings,
+  );
   if (!parsed.sections || typeof parsed.sections !== 'object' || Array.isArray(parsed.sections)) {
     throw new Error('AI 盘后复盘 sections 格式异常');
   }
@@ -1087,6 +1148,15 @@ function buildDeterministicSynthesis(evidence) {
   const stageDirection = directionText(stageValue, {
     flat: '接近平衡', missing: '暂不完整',
   });
+  const sessionSign = Number.isFinite(sessionValue) ? Math.sign(sessionValue) : 0;
+  const stageSign = Number.isFinite(stageValue) ? Math.sign(stageValue) : 0;
+  const baseBias = sessionSign && stageSign && sessionSign !== stageSign
+    ? '分化'
+    : sessionSign > 0 || stageSign > 0
+      ? '震荡偏强'
+      : sessionSign < 0 || stageSign < 0
+        ? '震荡偏弱'
+        : '震荡';
   const allAlignedRefs = [...new Set(evidence.associationEvidenceRefs)];
   if (!allAlignedRefs.length) throw new Error('确定性综合研判缺少收盘对齐证据');
   const alignedRefs = [];
@@ -1104,22 +1174,22 @@ function buildDeterministicSynthesis(evidence) {
 
   return {
     integratedAssessment: `核心指数当日表现${sessionDirection}，近阶段价格结构${stageDirection}。两类价格信号的相互印证程度构成当前主线，其他可用的收盘对齐信息用于检查这条主线是否获得更广泛确认或出现背离。单日表现不足以验证延续性，后续判断应以多类信号是否继续同向为准，而不能把当前状态直接外推为确定结果。`,
-    summary: `短期基准情景倾向于先观察当前价格结构能否获得更多收盘信号确认；确认不足时维持双向情景，不预设确定方向。`,
+    summary: `根据核心指数当日${sessionDirection}与近阶段${stageDirection}的组合，短期基准判断为${baseBias}；后续以价格、量能和市场内部结构验证。`,
     evidenceRefs: {
       integratedAssessment: alignedRefs,
       summary: alignedRefs,
     },
     citationRefs: { integratedAssessment: [], summary: [] },
     baseCase: {
-      bias: '数据不足',
-      text: `若当前${sessionDirection}且阶段结构${stageDirection}的价格组合后续仍缺少多类信号确认，基准情景维持数据不足，在确认前不预设确定方向。`,
+      bias: baseBias,
+      text: `核心指数当日${sessionDirection}、近阶段价格结构${stageDirection}，因此短期基准情景为${baseBias}；量能与市场内部信号将用于验证该判断。`,
       conditions: [
-        '关键收盘证据仍有缺失或覆盖边界',
-        '多类可用信号尚未形成一致方向',
+        '核心指数延续当前收盘结构',
+        '量能与市场内部信号没有明显反向背离',
       ],
       invalidations: [
-        '多类收盘信号形成稳定的同向确认',
-        '缺失的关键数据恢复并与现有证据相互验证',
+        '核心指数收盘结构转向',
+        '量能或市场内部信号出现持续反向背离',
       ],
       evidenceRefs: scenarioRefs,
       citationRefs: [],
@@ -1227,13 +1297,16 @@ function confidenceForEvidence(market, components, missing) {
   };
 }
 
-function outlookConfidenceForEvidence(confidence, { fallback = false } = {}) {
+function outlookConfidenceForEvidence(confidence, { fallbackFields = [] } = {}) {
   const evidenceLevel = String(confidence && confidence.level || '').toLowerCase();
+  const coreFallback = fallbackFields.includes('summary') || fallbackFields.includes('baseCase');
   return {
-    level: fallback || evidenceLevel === 'low' ? 'low' : 'medium',
+    level: coreFallback || evidenceLevel === 'low' ? 'low' : 'medium',
     isProbability: false,
     reasons: [
-      ...(fallback ? ['模型前瞻未通过校验，当前为服务端规则降级情景'] : []),
+      ...(fallbackFields.length
+        ? [`部分模型前瞻字段未通过校验：${fallbackFields.join('、')}`]
+        : []),
       '仅基于复盘日收盘前可用证据评估前瞻质量',
       ...(Array.isArray(confidence && confidence.reasons)
         ? confidence.reasons.slice(0, 2)
@@ -1242,7 +1315,7 @@ function outlookConfidenceForEvidence(confidence, { fallback = false } = {}) {
   };
 }
 
-function storedSynthesisOutlook(parsed, confidence, { fallback = false } = {}) {
+function storedSynthesisOutlook(parsed, confidence, { fallbackFields = [] } = {}) {
   const synthesis = parsed.synthesisOutlook;
   return {
     horizon: OUTLOOK_HORIZON,
@@ -1253,7 +1326,7 @@ function storedSynthesisOutlook(parsed, confidence, { fallback = false } = {}) {
     citationRefs: {
       integratedAssessment: synthesis.citationRefs.integratedAssessment,
     },
-    confidence: outlookConfidenceForEvidence(confidence, { fallback }),
+    confidence: outlookConfidenceForEvidence(confidence, { fallbackFields }),
     scenarios: OUTLOOK_SCENARIO_DEFS.map(([sourceKey, key, title]) => ({
       key,
       title,
@@ -1569,14 +1642,18 @@ function createMarketReviewService({
       key, title, items: parsed.sections[key],
     }));
     const sources = [...new Set(evidence.components.map((component) => component.meta.source).filter(Boolean))];
+    const prominentFallbackFields = parsed.validationWarnings
+      .filter((warning) => warning.code === 'prominent_field_fallback')
+      .map((warning) => warning.field);
+    const synthesisFallbackFields = parsed.validationWarnings
+      .filter((warning) => warning.code === 'synthesis_field_fallback')
+      .map((warning) => warning.field);
     const droppedItemCount = parsed.validationWarnings
-      .filter((warning) => !['prominent_fallback', 'synthesis_fallback'].includes(warning.code)).length;
-    const prominentFallbackUsed = parsed.validationWarnings
-      .some((warning) => warning.code === 'prominent_fallback');
-    const synthesisFallbackUsed = parsed.validationWarnings
-      .some((warning) => warning.code === 'synthesis_fallback');
+      .filter((warning) => warning.code === 'section_item_dropped').length;
+    const prominentFallbackUsed = prominentFallbackFields.length > 0;
+    const synthesisFallbackUsed = synthesisFallbackFields.length > 0;
     const synthesisOutlook = storedSynthesisOutlook(parsed, evidence.confidence, {
-      fallback: synthesisFallbackUsed,
+      fallbackFields: synthesisFallbackFields,
     });
     const review = {
       schemaVersion: REVIEW_SCHEMA_VERSION,
@@ -1619,10 +1696,10 @@ function createMarketReviewService({
       dataWarnings: [
         ...evidence.dataWarnings,
         ...parsed.validationWarnings.map((warning) => (
-          warning.code === 'prominent_fallback'
-            ? '模型卡片摘要未通过证据或语义校验，已使用服务端确定性摘要'
-            : warning.code === 'synthesis_fallback'
-              ? '模型综合研判或前瞻未通过证据与语义校验，已使用服务端条件式降级情景'
+          warning.code === 'prominent_field_fallback'
+            ? `模型卡片字段 ${warning.field} 未通过结构或安全校验，仅该字段已降级`
+            : warning.code === 'synthesis_field_fallback'
+              ? `模型研判字段 ${warning.field} 未通过结构或安全校验，其余模型分析已保留`
               : `模型输出 ${warning.section}[${warning.index}] 未通过证据或因果校验，已安全剔除`
         )),
       ],
@@ -1647,6 +1724,8 @@ function createMarketReviewService({
         droppedItemCount,
         prominentFallbackUsed,
         synthesisFallbackUsed,
+        prominentFallbackFields,
+        synthesisFallbackFields,
       },
       model: shortText(config.model, 100),
       sourceSummary: sources.join(' / '),
@@ -1662,8 +1741,8 @@ function createMarketReviewService({
         + ` tokens=${usage?.totalTokens ?? 'unknown'}`
         + ` reasoningTokens=${usage?.reasoningTokens ?? 'unknown'}`
         + ` dropped=${droppedItemCount}`
-        + ` prominentFallback=${prominentFallbackUsed}`
-        + ` synthesisFallback=${synthesisFallbackUsed}`);
+        + ` prominentFallback=${prominentFallbackFields.join(',') || 'none'}`
+        + ` synthesisFallback=${synthesisFallbackFields.join(',') || 'none'}`);
     }
     return review;
   }
