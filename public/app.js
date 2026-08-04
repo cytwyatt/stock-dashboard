@@ -86,6 +86,23 @@ const MA_COLORS = { MA5: '#e6b91e', MA10: '#4a9eff', MA20: '#c678dd' };
 const colorCls = (v) => (v > 0 ? 'c-up' : v < 0 ? 'c-down' : 'c-flat');
 const sign = (v) => (v > 0 ? '+' : '');
 const fmtPct = (v) => `${sign(v)}${v.toFixed(2)}%`;
+const SESSION_LABELS = { pre: '盘前', regular: '常规', post: '盘后' };
+const finiteMarketNumber = (value) => {
+  if (value == null || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+};
+
+function currentExtendedQuote(row) {
+  const extended = row && row.extended;
+  if (!extended || !['pre', 'post'].includes(extended.session)) return null;
+  return finiteMarketNumber(extended.price) == null ? null : extended;
+}
+
+function fmtExtendedPct(extended) {
+  const value = finiteMarketNumber(extended && extended.changePct);
+  return value == null ? '--' : fmtPct(value);
+}
 
 function fmtVol(v) {
   if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿';
@@ -144,8 +161,8 @@ function setDataMeta(el, meta, { showAdjustment = false, showCurrency = false } 
     : '';
 }
 
-/* ---------- 交易时段判断（按市场时区，含少量缓冲） ---------- */
-function isMarketOpen(market) {
+/* ---------- 交易时段判断（按市场时区，不覆盖节假日） ---------- */
+function marketSession(market) {
   const tz = market === 'us' ? 'America/New_York' : market === 'hk' ? 'Asia/Hong_Kong' : 'Asia/Shanghai';
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: tz,
@@ -156,13 +173,23 @@ function isMarketOpen(market) {
   }).formatToParts(new Date());
   const get = (t) => parts.find((p) => p.type === t).value;
   const wd = get('weekday');
-  if (wd === 'Sat' || wd === 'Sun') return false;
+  if (wd === 'Sat' || wd === 'Sun') return 'closed';
   const mins = parseInt(get('hour'), 10) * 60 + parseInt(get('minute'), 10);
-  // A股 09:15-15:05（北京时间）；港股 09:15-16:15；美股 09:25-16:05（美东时间）
-  if (market === 'us') return mins >= 565 && mins <= 965;
-  if (market === 'hk') return mins >= 555 && mins <= 975;
-  return mins >= 555 && mins <= 905;
+  if (market === 'us') {
+    if (mins >= 240 && mins < 570) return 'pre';
+    if (mins >= 570 && mins < 960) return 'regular';
+    if (mins >= 960 && mins < 1200) return 'post';
+    return 'closed';
+  }
+  // A股 09:15-15:05（北京时间）；港股 09:15-16:15（香港时间）。
+  if (market === 'hk') return mins >= 555 && mins <= 975 ? 'regular' : 'closed';
+  return mins >= 555 && mins <= 905 ? 'regular' : 'closed';
 }
+
+const isMarketDataActive = (market) => {
+  const session = marketSession(market);
+  return session === 'regular' || (market === 'us' && (session === 'pre' || session === 'post'));
+};
 
 /* ---------- 指数卡片 ---------- */
 async function loadIndices() {
@@ -175,14 +202,16 @@ async function loadIndices() {
   }
   const wrap = $('#indexCards');
   wrap.innerHTML = list
-    .map(
-      (i) => `
+    .map((i) => {
+      const extended = currentExtendedQuote(i);
+      return `
     <div class="index-card ${i.code === state.activeCode ? 'active' : ''}" data-code="${escapeHtml(i.code)}">
       <div class="idx-name">${escapeHtml(i.name)}</div>
       <div class="idx-price ${colorCls(i.change)}">${i.price.toFixed(2)}</div>
-      <div class="idx-chg ${colorCls(i.change)}">${sign(i.change)}${i.change.toFixed(2)} · ${fmtPct(i.changePct)}</div>
-    </div>`
-    )
+      <div class="idx-chg ${colorCls(i.change)}">${extended ? '<span class="idx-session">常规</span>' : ''}${sign(i.change)}${i.change.toFixed(2)} · ${fmtPct(i.changePct)}</div>
+      ${extended ? `<div class="idx-extended ${colorCls(extended.change)}"><span>${escapeHtml(extended.label || SESSION_LABELS[extended.session])}</span> ${Number(extended.price).toFixed(2)} · ${fmtExtendedPct(extended)}</div>` : ''}
+    </div>`;
+    })
     .join('');
   wrap.querySelectorAll('.index-card').forEach((el) =>
     el.addEventListener('click', () => {
@@ -192,9 +221,10 @@ async function loadIndices() {
     })
   );
   const t = list[0] && list[0].time ? String(list[0].time).replace(/\//g, '-') : '';
-  const open = isMarketOpen(state.market);
+  const session = marketSession(state.market);
   const stale = list._meta && list._meta.stale;
-  $('#updateTime').textContent = `${open ? '● 盘中' : '○ 已收盘'}${t ? ' · ' + t : ''}${stale ? ' · ⚠ 缓存' : ''}`;
+  const sessionText = session === 'pre' ? '● 盘前' : session === 'regular' ? '● 盘中' : session === 'post' ? '● 盘后' : '○ 已收盘';
+  $('#updateTime').textContent = `${sessionText}${t ? ' · ' + t : ''}${stale ? ' · ⚠ 缓存' : ''}`;
   $('#updateTime').title = list._meta ? `来源：${list._meta.source || '未知'}\n抓取：${list._meta.fetchedAt || '未知'}` : '';
 }
 
@@ -249,32 +279,65 @@ function renderMinute(inst, d) {
   const base = d.prevClose;
   const times = d.points.map((p) => p.t);
   const prices = d.points.map((p) => p.price);
+  const normalizedSessions = d.points.map((p) =>
+    ['pre', 'regular', 'post'].includes(p.session) ? p.session : 'regular'
+  );
+  const hasExtended = normalizedSessions.some((session) => session === 'pre' || session === 'post');
   const vols = d.points.map((p, i) => ({
     value: p.vol,
     itemStyle: {
       color: p.price >= (i > 0 ? d.points[i - 1].price : base) ? UP : DOWN,
+      opacity: hasExtended && normalizedSessions[i] !== 'regular' ? 0.45 : 0.8,
     },
   }));
-  const last = prices[prices.length - 1];
-  const color = last >= base ? UP : DOWN;
-  const pctMax = Math.max(...prices.map((p) => Math.abs(p / base - 1)), 0.002);
+  const regularPrices = d.points
+    .filter((_, index) => normalizedSessions[index] === 'regular')
+    .map((point) => point.price);
+  const regularLast = regularPrices.at(-1) ?? prices.at(-1);
+  const color = regularLast >= base ? UP : DOWN;
+  const axisBase = base > 0 ? base : prices[0];
+  const pctMax = Math.max(...prices.map((p) => Math.abs(p / axisBase - 1)), 0.002);
+  const sessionDefs = hasExtended
+    ? [
+        { session: 'pre', name: '盘前', color: '#7aa2d6', type: 'dashed' },
+        { session: 'regular', name: '常规', color, type: 'solid' },
+        { session: 'post', name: '盘后', color: '#d29922', type: 'dashed' },
+      ].filter((def) => normalizedSessions.includes(def.session))
+    : [{ session: null, name: '价格', color, type: 'solid' }];
 
   inst.clear();
   inst.setOption({
     animation: false,
     axisPointer: { link: [{ xAxisIndex: 'all' }] },
+    legend: {
+      show: hasExtended,
+      data: sessionDefs.map((def) => def.name),
+      top: 0,
+      right: 12,
+      itemWidth: 16,
+      itemHeight: 2,
+      textStyle: { color: DIM, fontSize: 10 },
+      selectedMode: false,
+    },
     grid: [
-      { left: 64, right: 12, top: 16, height: '62%' },
+      { left: 64, right: 12, top: hasExtended ? 28 : 16, height: hasExtended ? '58%' : '62%' },
       { left: 64, right: 12, top: '82%', bottom: 22 },
     ],
     tooltip: {
       ...TOOLTIP_STYLE,
       formatter(params) {
-        const p = params.find((x) => x.seriesName === 'price');
+        const p = params.find((x) =>
+          x.seriesType === 'line'
+          && x.value != null
+          && x.value !== '-'
+          && Number.isFinite(Number(x.value))
+        );
         if (!p) return '';
         const v = params.find((x) => x.seriesName === 'vol');
-        const pct = ((p.value / base - 1) * 100).toFixed(2);
-        return `${p.axisValue}<br/>价格: ${p.value.toFixed(2)}　涨幅: ${pct}%${v ? `<br/>成交量: ${fmtVol(v.value.value ?? v.value)}` : ''}`;
+        const session = normalizedSessions[p.dataIndex];
+        const sessionText = hasExtended ? ` · ${SESSION_LABELS[session] || '常规'}` : '';
+        const pct = base > 0 ? ((Number(p.value) / base - 1) * 100).toFixed(2) + '%' : '--';
+        return `${p.axisValue}${sessionText}<br/>价格: ${Number(p.value).toFixed(2)}　较昨收: ${pct}${v ? `<br/>成交量: ${fmtVol(v.value.value ?? v.value)}` : ''}`;
       },
     },
     xAxis: [
@@ -285,11 +348,11 @@ function renderMinute(inst, d) {
       {
         type: 'value',
         gridIndex: 0,
-        min: base * (1 - pctMax * 1.1),
-        max: base * (1 + pctMax * 1.1),
+        min: axisBase * (1 - pctMax * 1.1),
+        max: axisBase * (1 + pctMax * 1.1),
         splitLine: { lineStyle: { color: '#20262f' } },
         axisLabel: {
-          color: (v) => (v >= base ? UP : DOWN),
+          color: (v) => (v >= axisBase ? UP : DOWN),
           fontSize: 10,
           formatter: (v) => v.toFixed(0),
         },
@@ -302,28 +365,33 @@ function renderMinute(inst, d) {
       },
     ],
     series: [
-      {
-        name: 'price',
+      ...sessionDefs.map((def) => ({
+        name: def.name,
         type: 'line',
         xAxisIndex: 0,
         yAxisIndex: 0,
-        data: prices,
+        data: def.session
+          ? prices.map((price, index) => normalizedSessions[index] === def.session ? price : null)
+          : prices,
         symbol: 'none',
-        lineStyle: { color, width: 1.4 },
-        areaStyle: {
-          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-            { offset: 0, color: color + '55' },
-            { offset: 1, color: color + '05' },
-          ]),
-        },
-        markLine: {
+        connectNulls: false,
+        lineStyle: { color: def.color, width: def.session === 'regular' || !def.session ? 1.5 : 1.2, type: def.type },
+        ...(def.session === 'regular' || !def.session ? {
+          areaStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+              { offset: 0, color: def.color + '45' },
+              { offset: 1, color: def.color + '05' },
+            ]),
+          },
+          markLine: {
           symbol: 'none',
           silent: true,
           label: { show: false },
           lineStyle: { color: DIM, type: 'dashed', width: 1 },
           data: [{ yAxis: base }],
-        },
-      },
+          },
+        } : {}),
+      })),
       { name: 'vol', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: vols },
     ],
   });
@@ -966,17 +1034,18 @@ async function loadWatch() {
   setDataMeta($('#watchDataMeta'), quotes._meta);
   const byCode = new Map(quotes.map((q) => [q.code, q]));
   table.innerHTML =
-    `<tr><th>名称</th><th>最新价</th><th>涨跌幅</th><th>操作</th></tr>` +
+    `<tr><th>名称</th><th>价格</th><th>涨跌幅</th><th>操作</th></tr>` +
     list
       .map((s) => {
         const q = byCode.get(s.code);
+        const extended = currentExtendedQuote(q);
         const name = (q && q.name) || s.name || s.code.toUpperCase();
         const market = (q && q.market) || (/^(sh|sz|bj)\d{6}$/.test(s.code) ? 'cn' : /^hk/.test(s.code) ? 'hk' : 'us');
         return `
       <tr data-code="${escapeHtml(s.code)}" data-name="${escapeHtml(name)}">
         <td><div class="stock-name">${escapeHtml(name)}</div><div class="stock-code">${escapeHtml(s.code.toUpperCase())}</div></td>
-        <td>${q ? `${q.price.toFixed(2)}<div class="stock-code">${escapeHtml(q.currency || '')}</div>` : '--'}</td>
-        <td class="${q ? colorCls(q.changePct) : ''}">${q ? fmtPct(q.changePct) : '--'}</td>
+        <td>${q ? `<div>${q.price.toFixed(2)}</div><div class="stock-code">${extended ? '常规 · ' : ''}${escapeHtml(q.currency || '')}</div>${extended ? `<div class="watch-extended ${colorCls(extended.change)}"><span>${escapeHtml(extended.label || SESSION_LABELS[extended.session])}</span> ${Number(extended.price).toFixed(2)}</div>` : ''}` : '--'}</td>
+        <td>${q ? `<div class="${colorCls(q.changePct)}">${fmtPct(q.changePct)}</div>${extended ? `<div class="watch-extended ${colorCls(extended.changePct)}">${fmtExtendedPct(extended)}</div>` : ''}` : '--'}</td>
         <td><div class="watch-actions">
           <button type="button" class="ask-ai-btn"
             data-ai-code="${escapeHtml(s.code)}"
@@ -1022,6 +1091,7 @@ const modal = {
   market: 'cn',
   chartType: 'minute',
   req: 0,
+  quoteReq: 0,
   profileReq: 0,
   profileExpanded: false,
   researchReq: 0,
@@ -1318,6 +1388,8 @@ function openStock(code, name = '') {
   $('#mPrice').className = 'modal-price';
   $('#mChg').textContent = '';
   $('#mTime').textContent = '';
+  $('#mExtended').innerHTML = '';
+  $('#mExtended').style.display = 'none';
   $('#mStats').innerHTML = '';
   modal.profileExpanded = false;
   renderProfileLoading();
@@ -1347,6 +1419,7 @@ function closeStock() {
   $('#stockModal').style.display = 'none';
   modal.code = null;
   modal.req++;
+  modal.quoteReq++;
   modal.profileReq++;
   modal.researchReq++;
   clearTimeout(modal.researchTimer);
@@ -1370,19 +1443,39 @@ function updateModalAskAIButton() {
 }
 
 async function loadModalQuote() {
-  const q = await api(`/api/quote?code=${encodeURIComponent(modal.code)}`);
-  if (q.code !== modal.code) return;
+  const code = modal.code;
+  if (!code) return;
+  const req = ++modal.quoteReq;
+  const q = await api(`/api/quote?code=${encodeURIComponent(code)}`);
+  if (req !== modal.quoteReq || modal.code !== code || q.code !== code) return;
   modal.name = q.name;
   modal.market = q.market;
   $('#mName').textContent = q.name;
   updateModalAskAIButton();
   $('#mPrice').textContent = q.price.toFixed(2);
   $('#mPrice').className = `modal-price ${colorCls(q.change)}`;
-  $('#mChg').textContent = `${sign(q.change)}${q.change.toFixed(2)} · ${fmtPct(q.changePct)}`;
+  const extended = currentExtendedQuote(q);
+  $('#mChg').textContent = `${extended ? '常规 ' : ''}${sign(q.change)}${q.change.toFixed(2)} · ${fmtPct(q.changePct)}`;
   $('#mChg').className = `modal-chg ${colorCls(q.change)}`;
   $('#mTime').textContent = [q.time || '', q.currency || '', q._meta && q._meta.stale ? '⚠ 缓存数据' : '']
     .filter(Boolean).join(' · ');
   $('#mTime').title = q._meta ? `来源：${q._meta.source || '未知'}\n抓取：${q._meta.fetchedAt || '未知'}` : '';
+  const extendedEl = $('#mExtended');
+  if (q.market === 'us' && extended) {
+    const change = finiteMarketNumber(extended.change);
+    const hasChange = change != null;
+    const basis = extended.changeBasis === 'previous_regular_close' ? '较昨收' : '较常规收盘';
+    extendedEl.innerHTML = `
+      <span class="modal-extended-badge ${colorCls(change)}">${escapeHtml(extended.label || SESSION_LABELS[extended.session])}</span>
+      <span class="modal-extended-price ${colorCls(change)}">${Number(extended.price).toFixed(2)}</span>
+      <span class="modal-extended-change ${colorCls(change)}">${hasChange ? `${sign(change)}${change.toFixed(2)} · ${fmtExtendedPct(extended)}` : '--'}</span>
+      <span class="modal-extended-basis">${basis}</span>
+      <span class="modal-extended-time">${escapeHtml(extended.time || '')}${q._meta && q._meta.stale ? ' · ⚠ 缓存' : ''}</span>`;
+    extendedEl.style.display = 'flex';
+  } else {
+    extendedEl.innerHTML = '';
+    extendedEl.style.display = 'none';
+  }
   const rows =
     q.market === 'cn'
       ? [
@@ -2156,9 +2249,16 @@ async function switchMarket(market) {
 let lastQuotesAt = 0;
 async function refreshQuotes() {
   lastQuotesAt = Date.now();
-  if (state.market === 'llm') return;
+  const modalJobs = modal.code && $('#stockModal').style.display !== 'none'
+    ? [loadModalQuote(), ...(modal.chartType === 'minute' ? [loadModalChart()] : [])]
+    : [];
+  if (state.market === 'llm') {
+    await Promise.allSettled(modalJobs);
+    return;
+  }
   if (state.market === 'watch') {
-    try { await loadWatch(); } catch (e) { console.error(e); }
+    const results = await Promise.allSettled([loadWatch(), ...modalJobs]);
+    results.forEach((result) => result.status === 'rejected' && console.error(result.reason));
     return;
   }
   // 各区块互相独立，并行加载；仅走势图依赖指数列表
@@ -2167,6 +2267,7 @@ async function refreshQuotes() {
     loadRanks(),
     loadSectors(),
     loadOverview(),
+    ...modalJobs,
   ]);
   results.forEach((r) => r.status === 'rejected' && console.error(r.reason));
 }
@@ -2808,13 +2909,16 @@ $('#llmTest').addEventListener('click', async () => {
 
 initWatch().catch(console.error);
 refreshAll();
-// 盘中 30 秒刷新行情，收盘后降为 5 分钟，减少无效请求
+// 常规时段及美股盘前/盘后 30 秒刷新，其余时间降为 5 分钟。
 setInterval(() => {
-  const open =
+  const marketActive =
     state.market === 'watch'
-      ? isMarketOpen('cn') || isMarketOpen('hk') || isMarketOpen('us')
-      : isMarketOpen(state.market);
-  if (Date.now() - lastQuotesAt >= (open ? 30000 : 300000)) refreshQuotes();
+      ? isMarketDataActive('cn') || isMarketDataActive('hk') || isMarketDataActive('us')
+      : state.market !== 'llm' && isMarketDataActive(state.market);
+  const modalActive = modal.code
+    && $('#stockModal').style.display !== 'none'
+    && isMarketDataActive(modal.market);
+  if (Date.now() - lastQuotesAt >= (marketActive || modalActive ? 30000 : 300000)) refreshQuotes();
 }, 5000);
 setInterval(() => loadNews().catch(console.error), 300000); // 新闻 5 分钟刷新
 // 对“等待收盘/等待重试”状态低频轮询；成功复盘仍由服务端保证每市场每交易日只生成一次。

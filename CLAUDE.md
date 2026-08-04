@@ -58,6 +58,7 @@ ssh ubuntu-ts 'tailscale funnel --https=8443 off'         # 关公网（私网�
 | 腾讯港股报价字段位置与A股相同，但**单位不同**：成交量是股（非手）、成交额是港元（非万元）；f[30] 时间是斜杠格式 `2026/07/09 16:08:11`（非14位数字）；f[38] 换手率恒为0、f[46] 是英文名（非市净率）、盘口量恒为0 | `getQuote()` 港股分支不返回换手率/市净率/盘口；时间用 `fmtHKTime()` 解析 |
 | 港股K线要走 `hkfqkline/get`（`fqkline/get` 对 hk 代码只返回未复权）；分时接口与A股同一个 | 见 `getKline()` |
 | Yahoo K线 raw OHLC 会被拆股/分红扭曲 | `getKlineUS()` 必须请求 adjusted close，并按 `adjClose/rawClose` 同比例调整整根 OHLC；缺失时标 `raw_fallback`，不能冒充复权 |
+| Yahoo 美股盘前/盘后只能通过 chart/spark 的 `includePrePost=true` 与时间序列提取 | 顶层 `price/change/changePct/asOf` 始终保留常规时段口径，扩展价放在 `preMarket/postMarket/extended`；盘前相对昨收、盘后相对常规收盘。分时点必须保留 `session`，日/周/月 K 线不得混入扩展时段；指数或特殊标的不支持时返回 `null`，不得伪造 |
 | 研究卡需要跨市场统一但交易日历不同 | 默认基准固定为沪深300/恒生指数/标普500；`getResearchCardEntry()` 请求 400 日日线，A/H 股沿用腾讯前复权，美股沿用 Yahoo 公司行动调整口径 |
 | A股涨跌幅限制不是统一10% | `cnPriceLimitPct()` 按主板10%、创业/科创20%、北交所30%判断；涨停和跌停必须校验正负方向，不能只取绝对值 |
 | 港股涨跌榜用新浪 `Market_Center.getHKStockData`（腾讯 rank 服务只有A股板块）；`num` 上限60、无质量筛选，前排全是仙股/无量异动；**单页就要 ~2.5s** | `getRankHK()` 3页并行抓（顺序翻页会拖到8s+）再按序过滤（价<1港元或成交额<2000万剔除），别改回直接取前N |

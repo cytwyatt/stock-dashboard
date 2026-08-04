@@ -109,6 +109,7 @@ function marketSession(market, date = new Date()) {
     if (minutes < 960) return result('regular', '常规交易时段', true);
     return result('closed', '已收盘');
   }
+  if (minutes < 240) return result('closed', '已收盘');
   if (minutes < 570) return result('pre', '盘前');
   if (minutes < 960) return result('regular', '常规交易时段', true);
   if (minutes < 1200) return result('post', '盘后');

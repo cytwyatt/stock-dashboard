@@ -60,6 +60,46 @@ function yahooChartFixture() {
   };
 }
 
+function yahooExtendedChartFixture() {
+  const epoch = (value) => Date.parse(value) / 1000;
+  const preStart = epoch('2026-07-13T08:00:00Z');
+  const regularStart = epoch('2026-07-13T13:30:00Z');
+  const postStart = epoch('2026-07-13T20:00:00Z');
+  return {
+    chart: {
+      result: [{
+        meta: {
+          currency: 'USD',
+          exchangeTimezoneName: 'America/New_York',
+          hasPrePostMarketData: true,
+          longName: 'Apple Inc.',
+          chartPreviousClose: 100,
+          regularMarketPrice: 105,
+          regularMarketTime: epoch('2026-07-13T19:55:00Z'),
+          regularMarketDayHigh: 106,
+          regularMarketDayLow: 99,
+          regularMarketVolume: 123456,
+          tradingPeriods: {
+            pre: [[{ start: preStart, end: regularStart }]],
+            regular: [[{ start: regularStart, end: postStart }]],
+            post: [[{ start: postStart, end: epoch('2026-07-14T00:00:00Z') }]],
+          },
+        },
+        timestamp: [
+          epoch('2026-07-13T12:00:00Z'),
+          regularStart,
+          epoch('2026-07-13T19:55:00Z'),
+          epoch('2026-07-13T20:15:00Z'),
+        ],
+        indicators: {
+          quote: [{ close: [101.5, 102, 105, 106], volume: [0, 100, 200, 0] }],
+        },
+      }],
+      error: null,
+    },
+  };
+}
+
 function researchKlineRows(startPrice, dailyChange) {
   const start = Date.UTC(2025, 10, 1);
   let close = startPrice;
@@ -74,7 +114,9 @@ function installFetchFixture() {
   global.fetch = async (input) => {
     const url = String(input);
     if (url.includes('query1.finance.yahoo.com/v8/finance/chart/AAPL')) {
-      return jsonResponse(yahooChartFixture());
+      return jsonResponse(url.includes('includePrePost=true')
+        ? yahooExtendedChartFixture()
+        : yahooChartFixture());
     }
     if (url.includes('qt.gtimg.cn/q=sh600519')) {
       return new NativeResponse(tencentQuote('sh600519'), { status: 200 });
@@ -169,6 +211,24 @@ test('行情API统一返回data/meta并保留金融口径', async () => {
     assert.equal(kline.body.meta.adjustmentBasis, 'split_dividend_adjusted');
     assert.equal(kline.body.meta.adjustmentCoverage, 1);
     assert.deepEqual(kline.body.data.map((k) => k.close), [50, 50]);
+
+    const usQuote = await requestJSON(port, '/api/quote?code=AAPL');
+    assert.equal(usQuote.status, 200);
+    assert.equal(usQuote.body.data.price, 105);
+    assert.equal(usQuote.body.data.changePct, 5);
+    assert.equal(usQuote.body.data.asOf, '2026-07-13T19:55:00.000Z');
+    assert.equal(usQuote.body.data.preMarket.price, 101.5);
+    assert.equal(usQuote.body.data.postMarket.price, 106);
+    assert.equal(usQuote.body.data.extended.session, 'post');
+    assert.equal(usQuote.body.data.extended.changePct, 0.95);
+    assert.equal(usQuote.body.meta.asOf, usQuote.body.data.asOf);
+
+    const usMinute = await requestJSON(port, '/api/minute?code=AAPL');
+    assert.equal(usMinute.status, 200);
+    assert.deepEqual(usMinute.body.data.points.map((point) => point.session), [
+      'pre', 'regular', 'regular', 'post',
+    ]);
+    assert.equal(usMinute.body.meta.asOf, '2026-07-13T20:15:00.000Z');
 
     const cnKline = await requestJSON(port, '/api/kline?code=sh600519&days=30&period=day');
     assert.equal(cnKline.status, 200);

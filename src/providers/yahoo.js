@@ -68,6 +68,108 @@ function yahooRange(days) {
   return '2y';
 }
 
+const YAHOO_SESSION_LABELS = Object.freeze({
+  pre: '盘前',
+  regular: '常规',
+  post: '盘后',
+});
+
+function flattenTradingPeriods(value, out = []) {
+  if (Array.isArray(value)) {
+    for (const item of value) flattenTradingPeriods(item, out);
+  } else if (value && typeof value === 'object') {
+    const start = Number(value.start);
+    const end = Number(value.end);
+    if (Number.isFinite(start) && Number.isFinite(end) && end > start) {
+      out.push({ start, end });
+    }
+  }
+  return out;
+}
+
+function yahooSessionAt(meta, timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value)) return 'unknown';
+  for (const session of ['pre', 'regular', 'post']) {
+    const periods = flattenTradingPeriods(meta && meta.tradingPeriods && meta.tradingPeriods[session]);
+    flattenTradingPeriods(meta && meta.currentTradingPeriod && meta.currentTradingPeriod[session], periods);
+    if (periods.some(({ start, end }) => value >= start && value < end)) return session;
+  }
+  return 'unknown';
+}
+
+function latestYahooSessionQuote(result, session, referencePrice, {
+  formatTime = fmtTimeInTZ,
+} = {}) {
+  const meta = result.meta || {};
+  const timestamps = result.timestamp || [];
+  const quote = result.indicators && result.indicators.quote && result.indicators.quote[0] || {};
+  const closes = quote.close || [];
+  let latest = null;
+  for (let index = 0; index < timestamps.length; index++) {
+    const timestamp = Number(timestamps[index]);
+    const rawPrice = closes[index];
+    if (rawPrice == null || rawPrice === '') continue;
+    const price = Number(rawPrice);
+    if (!Number.isFinite(timestamp) || !Number.isFinite(price)) continue;
+    if (yahooSessionAt(meta, timestamp) !== session) continue;
+    if (!latest || timestamp > latest.timestamp) latest = { timestamp, price };
+  }
+  if (!latest) return null;
+
+  const reference = Number(referencePrice);
+  const hasReference = Number.isFinite(reference) && reference > 0;
+  const change = hasReference ? +(latest.price - reference).toFixed(2) : null;
+  const changePct = hasReference ? +(((latest.price - reference) / reference) * 100).toFixed(2) : null;
+  const timezone = meta.exchangeTimezoneName || 'America/New_York';
+  return {
+    timestamp: latest.timestamp,
+    data: {
+      session,
+      label: YAHOO_SESSION_LABELS[session],
+      price: +latest.price.toFixed(4),
+      referencePrice: hasReference ? reference : null,
+      change,
+      changePct,
+      changeBasis: session === 'pre' ? 'previous_regular_close' : 'regular_close',
+      time: `美东 ${formatTime(latest.timestamp, timezone)}`,
+      asOf: new Date(latest.timestamp * 1000).toISOString(),
+    },
+  };
+}
+
+function yahooExtendedQuotes(result, {
+  previousClose,
+  regularPrice,
+  formatTime = fmtTimeInTZ,
+} = {}) {
+  const regularTimestamp = Number(result.meta && result.meta.regularMarketTime) || 0;
+  if (result.meta && result.meta.hasPrePostMarketData === false) {
+    return {
+      preMarket: null,
+      postMarket: null,
+      extended: null,
+      latestTimestamp: regularTimestamp,
+    };
+  }
+  const pre = latestYahooSessionQuote(result, 'pre', previousClose, { formatTime });
+  const post = latestYahooSessionQuote(result, 'post', regularPrice, { formatTime });
+  const latestExtended = [pre, post]
+    .filter((item) => item && item.timestamp > regularTimestamp)
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .at(-1) || null;
+  return {
+    preMarket: pre ? pre.data : null,
+    postMarket: post ? post.data : null,
+    extended: latestExtended ? latestExtended.data : null,
+    latestTimestamp: Math.max(
+      regularTimestamp,
+      pre ? pre.timestamp : 0,
+      post ? post.timestamp : 0
+    ),
+  };
+}
+
 function parseSparkQuotes(payload, defs, {
   annotateMarketData,
   formatTime = fmtTimeInTZ,
@@ -75,10 +177,16 @@ function parseSparkQuotes(payload, defs, {
   const results = (payload.spark && payload.spark.result) || [];
   const quotes = defs.map(({ code, name, unit }) => {
     const result = results.find((item) => item.symbol === code);
-    const meta = result && result.response && result.response[0] && result.response[0].meta;
+    const response = result && result.response && result.response[0];
+    const meta = response && response.meta;
     if (!meta) return null;
     const prev = meta.chartPreviousClose || meta.previousClose || 0;
     const price = meta.regularMarketPrice || 0;
+    const extendedQuotes = yahooExtendedQuotes(response, {
+      previousClose: prev,
+      regularPrice: price,
+      formatTime,
+    });
     return {
       code,
       name: name || meta.shortName || meta.longName || code,
@@ -96,6 +204,9 @@ function parseSparkQuotes(payload, defs, {
         ? `美东 ${formatTime(meta.regularMarketTime, meta.exchangeTimezoneName || 'America/New_York')}`
         : '',
       asOf: meta.regularMarketTime ? new Date(meta.regularMarketTime * 1000).toISOString() : '',
+      preMarket: extendedQuotes.preMarket,
+      postMarket: extendedQuotes.postMarket,
+      extended: extendedQuotes.extended,
     };
   }).filter(Boolean);
   const currencies = [...new Set(quotes.map((quote) => quote.currency).filter(Boolean))];
@@ -132,6 +243,7 @@ function parseYahooMinute(result, code, {
       t: formatTime(timestamps[index], timezone),
       price: +price.toFixed(2),
       vol: (quote.volume && quote.volume[index]) || 0,
+      session: yahooSessionAt(result.meta, timestamps[index]),
     });
   }
   return annotateMarketData({
@@ -208,6 +320,11 @@ function parseYahooQuote(result, code, {
   const prev = meta.chartPreviousClose || meta.previousClose || 0;
   const price = meta.regularMarketPrice || 0;
   const asOf = meta.regularMarketTime ? new Date(meta.regularMarketTime * 1000).toISOString() : '';
+  const extendedQuotes = yahooExtendedQuotes(result, {
+    previousClose: prev,
+    regularPrice: price,
+    formatTime,
+  });
   return annotateMarketData({
     code,
     market: 'us',
@@ -227,6 +344,9 @@ function parseYahooQuote(result, code, {
       ? `美东 ${formatTime(meta.regularMarketTime, meta.exchangeTimezoneName || 'America/New_York')}`
       : '',
     asOf,
+    preMarket: extendedQuotes.preMarket,
+    postMarket: extendedQuotes.postMarket,
+    extended: extendedQuotes.extended,
   }, {
     market: 'us',
     source: 'Yahoo Finance',
@@ -304,8 +424,15 @@ function createYahooProvider({
     );
   }
 
-  async function yahooChart(symbol, range, interval, { adjusted = false } = {}) {
-    const extras = adjusted ? '&includeAdjustedClose=true&events=div%2Csplits' : '';
+  async function yahooChart(symbol, range, interval, {
+    adjusted = false,
+    includePrePost = false,
+  } = {}) {
+    const extras = [
+      includePrePost ? 'includePrePost=true' : '',
+      adjusted ? 'includeAdjustedClose=true' : '',
+      adjusted ? 'events=div%2Csplits' : '',
+    ].filter(Boolean).map((item) => `&${item}`).join('');
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}${extras}`;
     const payload = JSON.parse(await yahooFetch(url));
     const result = payload.chart && payload.chart.result && payload.chart.result[0];
@@ -315,13 +442,13 @@ function createYahooProvider({
 
   async function sparkQuotes(defs) {
     const symbols = defs.map((def) => def.code).join(',');
-    const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbols)}&range=1d&interval=5m`;
+    const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbols)}&range=1d&interval=5m&includePrePost=true`;
     const payload = JSON.parse(await yahooFetch(url));
     return parseSparkQuotes(payload, defs, { annotateMarketData, formatTime });
   }
 
   async function getMinute(code) {
-    const result = await yahooChart(code, '1d', '5m');
+    const result = await yahooChart(code, '1d', '5m', { includePrePost: true });
     return parseYahooMinute(result, code, { annotateMarketData, formatTime });
   }
 
@@ -352,7 +479,7 @@ function createYahooProvider({
   }
 
   async function getQuote(code) {
-    const result = await yahooChart(code, '1d', '5m');
+    const result = await yahooChart(code, '1d', '5m', { includePrePost: true });
     return parseYahooQuote(result, code, { annotateMarketData, formatTime });
   }
 
@@ -376,6 +503,8 @@ module.exports = {
   US_MACRO,
   fmtTimeInTZ,
   yahooRange,
+  yahooSessionAt,
+  yahooExtendedQuotes,
   parseSparkQuotes,
   parseYahooMinute,
   parseYahooKline,

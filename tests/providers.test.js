@@ -7,8 +7,11 @@ const { createHttpClient } = require('../src/providers/http-client');
 const {
   createYahooScheduler,
   createYahooProvider,
+  yahooSessionAt,
   parseSparkQuotes,
+  parseYahooMinute,
   parseYahooKline,
+  parseYahooQuote,
   parseYahooRank,
 } = require('../src/providers/yahoo');
 const {
@@ -192,6 +195,152 @@ test('Yahoo spark 含金额字段时声明基础币种金额单位', () => {
 
   assert.equal(quotes[0].amount, 0);
   assert.equal(getMeta(quotes).amountUnit, 'base_currency');
+});
+
+function yahooExtendedFixture({ supportsExtended = true, regularPrice = 105 } = {}) {
+  const epoch = (value) => Date.parse(value) / 1000;
+  const preStart = epoch('2026-07-13T08:00:00Z');
+  const regularStart = epoch('2026-07-13T13:30:00Z');
+  const postStart = epoch('2026-07-13T20:00:00Z');
+  const postEnd = epoch('2026-07-14T00:00:00Z');
+  return {
+    meta: {
+      currency: 'USD',
+      exchangeTimezoneName: 'America/New_York',
+      hasPrePostMarketData: supportsExtended,
+      chartPreviousClose: 100,
+      regularMarketPrice: regularPrice,
+      regularMarketTime: epoch('2026-07-13T19:55:00Z'),
+      regularMarketDayHigh: 106,
+      regularMarketDayLow: 99,
+      regularMarketVolume: 123456,
+      longName: 'Example Corp.',
+      tradingPeriods: {
+        pre: [[{ start: preStart, end: regularStart }]],
+        regular: [[{ start: regularStart, end: postStart }]],
+        post: [[{ start: postStart, end: postEnd }]],
+      },
+    },
+    timestamp: [
+      epoch('2026-07-13T12:00:00Z'),
+      regularStart,
+      epoch('2026-07-13T19:55:00Z'),
+      postStart,
+      epoch('2026-07-13T20:15:00Z'),
+    ],
+    indicators: {
+      quote: [{
+        close: [101.5, 102, regularPrice, null, 106],
+        volume: [0, 100, 200, 0, 0],
+      }],
+    },
+  };
+}
+
+test('Yahoo chart 仅为报价和分时开启盘前盘后，K 线仍只保留复权参数', async () => {
+  const urls = [];
+  const yahoo = createYahooProvider({
+    fetchText: async (url) => {
+      urls.push(url);
+      const result = yahooExtendedFixture();
+      if (url.includes('/spark?')) {
+        return JSON.stringify({ spark: { result: [{ symbol: 'AAPL', response: [result] }] } });
+      }
+      return JSON.stringify({ chart: { result: [result], error: null } });
+    },
+    annotateMarketData,
+    minIntervalMs: 0,
+    scheduler: createYahooScheduler(),
+  });
+
+  await yahoo.getMinute('AAPL');
+  await yahoo.getQuote('AAPL');
+  await yahoo.getKline('AAPL', 30, 'day');
+  await yahoo.getQuotes(['AAPL']);
+
+  assert.match(urls[0], /includePrePost=true/);
+  assert.match(urls[1], /includePrePost=true/);
+  assert.doesNotMatch(urls[2], /includePrePost/);
+  assert.match(urls[2], /includeAdjustedClose=true/);
+  assert.match(urls[2], /events=div%2Csplits/);
+  assert.match(urls[3], /includePrePost=true/);
+});
+
+test('Yahoo spark 批量报价可携带扩展时段，数组元数据仍对齐常规价', () => {
+  const result = yahooExtendedFixture();
+  const quotes = parseSparkQuotes({
+    spark: { result: [{ symbol: 'AAPL', response: [result] }] },
+  }, [{ code: 'AAPL', name: '苹果' }], { annotateMarketData });
+
+  assert.equal(quotes[0].price, 105);
+  assert.equal(quotes[0].asOf, '2026-07-13T19:55:00.000Z');
+  assert.equal(quotes[0].extended.session, 'post');
+  assert.equal(quotes[0].extended.price, 106);
+  assert.equal(getMeta(quotes).asOf, quotes[0].asOf);
+});
+
+test('Yahoo 扩展时段按上游边界分类，分时保留盘前、常规与盘后标记', () => {
+  const result = yahooExtendedFixture();
+  const periods = result.meta.tradingPeriods;
+  assert.equal(yahooSessionAt(result.meta, periods.pre[0][0].start), 'pre');
+  assert.equal(yahooSessionAt(result.meta, periods.regular[0][0].start), 'regular');
+  assert.equal(yahooSessionAt(result.meta, periods.post[0][0].start), 'post');
+  assert.equal(yahooSessionAt(result.meta, periods.post[0][0].end), 'unknown');
+
+  const minute = parseYahooMinute(result, 'AAPL', { annotateMarketData });
+  assert.deepEqual(minute.points.map((point) => point.session), [
+    'pre', 'regular', 'regular', 'post',
+  ]);
+  assert.equal(minute.points.at(-1).price, 106);
+  assert.equal(getMeta(minute).asOf, '2026-07-13T20:15:00.000Z');
+});
+
+test('Yahoo 报价保持常规字段，盘前相对昨收、盘后相对常规收盘', () => {
+  const result = yahooExtendedFixture();
+  const quote = parseYahooQuote(result, 'AAPL', { annotateMarketData });
+
+  assert.equal(quote.price, 105);
+  assert.equal(quote.change, 5);
+  assert.equal(quote.changePct, 5);
+  assert.equal(quote.asOf, '2026-07-13T19:55:00.000Z');
+  assert.deepEqual(quote.preMarket, {
+    session: 'pre', label: '盘前', price: 101.5, referencePrice: 100,
+    change: 1.5, changePct: 1.5, changeBasis: 'previous_regular_close',
+    time: '美东 08:00', asOf: '2026-07-13T12:00:00.000Z',
+  });
+  assert.deepEqual(quote.postMarket, {
+    session: 'post', label: '盘后', price: 106, referencePrice: 105,
+    change: 1, changePct: 0.95, changeBasis: 'regular_close',
+    time: '美东 16:15', asOf: '2026-07-13T20:15:00.000Z',
+  });
+  assert.deepEqual(quote.extended, quote.postMarket);
+  assert.equal(getMeta(quote).asOf, quote.asOf);
+});
+
+test('Yahoo 不支持扩展行情时不伪造盘前盘后，缺少参考价时不补零涨跌', () => {
+  const unsupported = parseYahooQuote(
+    yahooExtendedFixture({ supportsExtended: false }),
+    '^GSPC',
+    { annotateMarketData }
+  );
+  assert.equal(unsupported.preMarket, null);
+  assert.equal(unsupported.postMarket, null);
+  assert.equal(unsupported.extended, null);
+
+  const nullPost = yahooExtendedFixture();
+  nullPost.indicators.quote[0].close[4] = null;
+  const withoutPostTrade = parseYahooQuote(nullPost, 'AAPL', { annotateMarketData });
+  assert.equal(withoutPostTrade.postMarket, null);
+  assert.equal(withoutPostTrade.extended, null);
+
+  const missingReference = parseYahooQuote(
+    yahooExtendedFixture({ regularPrice: 0 }),
+    'AAPL',
+    { annotateMarketData }
+  );
+  assert.equal(missingReference.postMarket.referencePrice, null);
+  assert.equal(missingReference.postMarket.change, null);
+  assert.equal(missingReference.postMarket.changePct, null);
 });
 
 test('Yahoo K线解析用复权因子同步调整整根 OHLC', () => {
