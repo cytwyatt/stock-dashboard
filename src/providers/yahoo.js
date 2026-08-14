@@ -402,6 +402,106 @@ function parseYahooRank(payload, count, { annotateMarketData, num = defaultNum }
   });
 }
 
+function cleanYahooNewsText(value, maxLength) {
+  if (typeof value !== 'string' && typeof value !== 'number') return '';
+  return String(value)
+    .normalize('NFKC')
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#(?:0*39|x0*27);/gi, "'")
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function normalizeYahooTicker(value) {
+  if (typeof value !== 'string' && typeof value !== 'number') return '';
+  const ticker = String(value).normalize('NFKC').trim().toUpperCase();
+  if (!ticker || ticker.length > 32) return '';
+  return /^[A-Z0-9^][A-Z0-9.^=_-]*$/.test(ticker) ? ticker : '';
+}
+
+function normalizeYahooNewsUrl(value) {
+  try {
+    const url = new URL(String(value || '').trim());
+    if (!['http:', 'https:'].includes(url.protocol)) return '';
+    if (url.username || url.password) return '';
+    const hostname = url.hostname.toLowerCase();
+    if (!/(^|\.)finance\.yahoo\.com$/.test(hostname)) return '';
+    url.hash = '';
+    return url.toString().slice(0, 800);
+  } catch {
+    return '';
+  }
+}
+
+function parseYahooStockNews(payload, rawCode) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || !Array.isArray(payload.quotes) || !Array.isArray(payload.news)) {
+    throw new Error('Yahoo 个股资讯响应结构异常：缺少或无效的 quotes/news 数组');
+  }
+
+  const code = normalizeYahooTicker(rawCode);
+  if (!code) throw new Error('Yahoo 个股资讯代码无效');
+  const quote = payload.quotes.find((item) => item && typeof item === 'object'
+    && normalizeYahooTicker(item.symbol) === code);
+  const quoteType = String(quote && quote.quoteType || '').toUpperCase();
+  if (!quote || !['EQUITY', 'ETF'].includes(quoteType)) {
+    throw new Error('Yahoo 个股资讯仅支持可确认的美股或美股 ETF 代码');
+  }
+  const seenUrls = new Set();
+  const seenTitles = new Set();
+  const items = [];
+
+  for (const news of payload.news) {
+    if (!news || typeof news !== 'object' || Array.isArray(news) || news.type !== 'STORY') {
+      continue;
+    }
+    const normalizedTickers = Array.isArray(news.relatedTickers)
+      ? [...new Set(news.relatedTickers.map(normalizeYahooTicker).filter(Boolean))]
+      : [];
+    if (!normalizedTickers.includes(code)) continue;
+
+    const title = cleanYahooNewsText(news.title, 240);
+    const source = cleanYahooNewsText(news.publisher, 120) || 'Yahoo Finance';
+    const url = normalizeYahooNewsUrl(news.link);
+    const publishSeconds = (typeof news.providerPublishTime === 'number'
+      || typeof news.providerPublishTime === 'string')
+      ? Number(news.providerPublishTime)
+      : NaN;
+    const time = publishSeconds * 1000;
+    const date = new Date(time);
+    if (!title || !url || !Number.isFinite(publishSeconds) || publishSeconds <= 0
+        || !Number.isFinite(time) || Number.isNaN(date.getTime())) {
+      continue;
+    }
+
+    const primaryTicker = normalizedTickers[0] || '';
+    const relatedTickers = normalizedTickers.slice(0, 20);
+    if (!relatedTickers.includes(code)) relatedTickers[relatedTickers.length - 1] = code;
+    const titleKey = `${time}:${title.toLocaleLowerCase('en-US')}`;
+    if (seenUrls.has(url) || seenTitles.has(titleKey)) continue;
+    seenUrls.add(url);
+    seenTitles.add(titleKey);
+    items.push({
+      title,
+      url,
+      time,
+      publishedAt: date.toISOString(),
+      source,
+      relatedTickers,
+      primaryTicker,
+    });
+  }
+
+  return items.sort((left, right) => right.time - left.time);
+}
+
 function createYahooProvider({
   fetchText,
   annotateMarketData,
@@ -483,6 +583,14 @@ function createYahooProvider({
     return parseYahooQuote(result, code, { annotateMarketData, formatTime });
   }
 
+  async function getStockNews(rawCode) {
+    const code = normalizeYahooTicker(rawCode);
+    if (!code) throw new Error('Yahoo 个股资讯代码无效');
+    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(code)}&quotesCount=1&newsCount=10&enableFuzzyQuery=false`;
+    const payload = JSON.parse(await yahooFetch(url));
+    return parseYahooStockNews(payload, code);
+  }
+
   return {
     yahooFetch,
     yahooChart,
@@ -492,6 +600,7 @@ function createYahooProvider({
     getKline,
     getRank,
     getQuote,
+    getStockNews,
     getQuotes: (codes) => sparkQuotes(codes.map((code) => ({ code }))),
     getOverview: () => sparkQuotes(US_MACRO),
   };
@@ -510,6 +619,7 @@ module.exports = {
   parseYahooKline,
   parseYahooQuote,
   parseYahooRank,
+  parseYahooStockNews,
   createYahooScheduler,
   defaultYahooScheduler,
   createYahooProvider,

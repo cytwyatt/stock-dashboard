@@ -6,6 +6,7 @@ const assert = require('node:assert/strict');
 const { createEvidenceBuilder } = require('../src/ai/evidence');
 
 const CN_CONTEXT = { code: 'sh600519', name: '贵州茅台', market: 'cn' };
+const US_CONTEXT = { code: 'AAPL', name: '苹果', market: 'us' };
 
 function makeQuote(changePct = 1.5, overrides = {}) {
   return {
@@ -36,10 +37,12 @@ function createHarness({
   stockEventsError = null,
   meta = {},
   now = () => Date.UTC(2026, 6, 13, 12, 34, 56),
-  isCNCode = (code) => /^(sh|sz|bj)\d{6}$/.test(code),
+  supports = (code) => /^(?:sh|sz|bj)\d{6}$/.test(code)
+    || /^[A-Z][A-Z0-9.-]{0,9}$/.test(code),
 } = {}) {
   const calls = [];
   const errors = [];
+  const supportChecks = [];
   const marketService = {
     async quote(code) {
       calls.push(['quote', code]);
@@ -53,6 +56,10 @@ function createHarness({
     },
   };
   const stockEventsService = {
+    supports(code) {
+      supportChecks.push(code);
+      return supports(code);
+    },
     async getStockEvents(code, options) {
       calls.push(['stockEvents', code, options]);
       if (stockEventsError) throw stockEventsError;
@@ -77,11 +84,10 @@ function createHarness({
     stockEventsService,
     marketMeta,
     marketForCode,
-    isCNCode,
     logger,
     now,
   });
-  return { ...builder, calls, errors, researchEntry, stockEvents };
+  return { ...builder, calls, errors, supportChecks, researchEntry, stockEvents };
 }
 
 test('builder guards return null without callbacks or I/O', async () => {
@@ -272,6 +278,54 @@ test('reason intent fetches events even for a normal move and compacts the quote
   assert.deepEqual(harness.errors, []);
 });
 
+test('AAPL reason intent uses US quote identity and fetches US events', async () => {
+  const quote = makeQuote(1.2, {
+    code: 'AAPL',
+    name: 'Apple Inc.',
+    market: 'us',
+    price: 231.4,
+    prevClose: 228.66,
+    change: 2.74,
+  });
+  const stockEvents = {
+    asOf: '2026-07-13T15:00:00.000Z',
+    coverage: { supported: true, source: 'Yahoo Finance' },
+    events: [{
+      title: 'Apple event',
+      relation: 'primary_symbol',
+      url: 'https://finance.yahoo.com/news/apple-event',
+    }],
+  };
+  const harness = createHarness({ quote, stockEvents });
+  const tools = [];
+
+  const result = await harness.buildAutomaticStockEvidence(
+    US_CONTEXT,
+    'AAPL 今天为什么涨？',
+    { onTool: (name, args) => tools.push([name, args]) },
+  );
+
+  assert.deepEqual(tools, [
+    ['get_quote', { code: 'AAPL', auto: true }],
+    ['get_stock_events', { code: 'AAPL', lookbackHours: 72, auto: true }],
+  ]);
+  assert.deepEqual(harness.calls, [
+    ['quote', 'AAPL'],
+    ['stockEvents', 'AAPL', {
+      name: 'Apple Inc.',
+      lookbackHours: 72,
+      limit: 8,
+    }],
+  ]);
+  assert.equal(result.reasonIntent, true);
+  assert.equal(result.abnormalMove, false);
+  assert.equal(result.quote.code, 'AAPL');
+  assert.equal(result.quote.name, 'Apple Inc.');
+  assert.deepEqual(result.stockEvents, stockEvents);
+  assert.deepEqual(harness.supportChecks, []);
+  assert.deepEqual(harness.errors, []);
+});
+
 test('checkMove uses an inclusive absolute 7 percent threshold', async (t) => {
   for (const { value, abnormal } of [
     { value: '7', abnormal: true },
@@ -356,7 +410,7 @@ test('event failures use injected now, market support predicate, and logger', as
   const harness = createHarness({
     stockEventsError: new Error('news down'),
     now: () => fixedNow,
-    isCNCode(code) {
+    supports(code) {
       checkedCodes.push(code);
       return code === 'sh600519';
     },
@@ -373,6 +427,35 @@ test('event failures use injected now, market support predicate, and logger', as
   assert.equal(result.stockEvents.stock, CN_CONTEXT);
   assert.deepEqual(checkedCodes, ['sh600519']);
   assert.deepEqual(harness.errors, ['[stock-evidence] news sh600519: news down']);
+});
+
+test('AAPL event failure fallback remains supported through stockEventsService', async () => {
+  const fixedNow = Date.UTC(2026, 6, 13, 12, 34, 56);
+  const quote = makeQuote(1.2, {
+    code: 'AAPL',
+    name: 'Apple Inc.',
+    market: 'us',
+  });
+  const harness = createHarness({
+    quote,
+    stockEventsError: new Error('yahoo news down'),
+    now: () => fixedNow,
+    supports: (code) => code === 'AAPL',
+  });
+
+  const result = await harness.buildAutomaticStockEvidence(
+    US_CONTEXT,
+    '这只美股异动的原因是什么？',
+  );
+
+  assert.deepEqual(result.stockEvents, {
+    asOf: '2026-07-13T12:34:56.000Z',
+    stock: US_CONTEXT,
+    coverage: { supported: true, error: '个股资讯源暂时不可用' },
+    events: [],
+  });
+  assert.deepEqual(harness.supportChecks, ['AAPL']);
+  assert.deepEqual(harness.errors, ['[stock-evidence] news AAPL: yahoo news down']);
 });
 
 test('callback exceptions preserve the current asymmetric boundaries', async (t) => {

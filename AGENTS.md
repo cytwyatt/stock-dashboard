@@ -45,6 +45,7 @@ ssh ubuntu-ts 'tailscale funnel --https=8443 off'         # 关公网（私网�
 | Yahoo 按「UA+IP」分桶限流，连发几个请求就 429，冷却约 1 分钟 | 所有 Yahoo 请求必须走 `yahooFetch()`（串行队列 + 独立简短 UA + 退避重试）。新增 Yahoo 调用绝不能直接 fetch |
 | Yahoo spark 接口可一次批量取多个报价 | 指数/宏观报价用 `sparkQuotes()`，不要逐个调 chart |
 | Yahoo screener 默认不返回行业，指定 `fields` 后又只返回列出的字段 | 美股涨跌榜必须在原 screener 请求中同时列全 symbol、名称、币种、价格、涨跌、交易所及 `sector/industry`；不能只写行业字段导致原行情被裁掉，也不能为榜单逐只请求 Nasdaq profile |
+| Yahoo Search 个股资讯会返回精确时间、发布方、Yahoo 托管链接与 `relatedTickers`，但短代码和宽泛主题容易混入仅关联稿件 | 美股个股资讯必须复用 `yahooFetch()`，先用精确 symbol 的 `quoteType` 确认为 `EQUITY/ETF`，再只接受 `STORY`、目标代码精确出现在 `relatedTickers` 且链接属于 `finance.yahoo.com` 的条目；标题直接点名、关联列表首位和列表其他位置必须分级，任何标签都不能直接证明涨跌因果 |
 | 新浪美股榜单 `num` 参数被截断为 20 | 已弃用，美股榜单走 Yahoo screener |
 | 新浪 A股涨跌榜按涨幅排序时前排全是异动仙股 | `getRankCN()` 必须多取候选，过滤 N/C 新股、ST、退市、价<1元或成交额<2000万元后再取前N；别改回直接 `slice` |
 | 新浪 A股个股资讯页是 GBK HTML、无正式 API/SLA，`sh/sz/bj` 完整代码均可用 | `getStockNewsCN()` 必须走 `fetchText(..., {encoding:'gbk'})`，只解析 `.datelist`，链接限制为新浪 http/https 域名；页面有链接却零条解析时要报结构异常，不能静默当作“无新闻” |

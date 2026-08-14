@@ -13,6 +13,7 @@ const {
   parseYahooKline,
   parseYahooQuote,
   parseYahooRank,
+  parseYahooStockNews,
 } = require('../src/providers/yahoo');
 const {
   createTencentProvider,
@@ -652,6 +653,110 @@ test('Yahoo 涨跌榜请求行业字段，并安全规范化可选行业分类',
   assert.equal(capped[0].sector.length, 200);
 });
 
+test('Yahoo 个股资讯只保留精确关联的 STORY，并清理来源、链接与代码', () => {
+  const published = 1783958400;
+  const longTickers = Array.from({ length: 24 }, (_, index) => `T${index}`);
+  const items = parseYahooStockNews({
+    quotes: [{ symbol: 'AAPL', quoteType: 'EQUITY' }],
+    news: [
+      {
+        type: 'STORY',
+        title: `  <b>Apple&nbsp;launch</b> ${'x'.repeat(260)}  `,
+        publisher: `<i>Example   &amp; Wire</i>${'s'.repeat(140)}`,
+        link: 'https://finance.yahoo.com/news/apple-launch?id=1#comments',
+        providerPublishTime: published,
+        relatedTickers: [...longTickers, ' aapl ', 'bad/ticker', 'AAPL'],
+      },
+      {
+        type: 'STORY',
+        title: '重复链接',
+        publisher: 'Yahoo Finance',
+        link: 'https://finance.yahoo.com/news/apple-launch?id=1#other',
+        providerPublishTime: published - 1,
+        relatedTickers: ['AAPL'],
+      },
+      {
+        type: 'VIDEO',
+        title: '不是 STORY',
+        link: 'https://finance.yahoo.com/video/apple',
+        providerPublishTime: published,
+        relatedTickers: ['AAPL'],
+      },
+      {
+        type: 'STORY',
+        title: '模糊代码不得命中',
+        link: 'https://finance.yahoo.com/news/fuzzy',
+        providerPublishTime: published,
+        relatedTickers: ['AAPL.MX'],
+      },
+      {
+        type: 'STORY',
+        title: '外部域名不得进入证据',
+        link: 'https://finance.yahoo.com.evil.example/news/fake',
+        providerPublishTime: published,
+        relatedTickers: ['AAPL'],
+      },
+      {
+        type: 'STORY',
+        title: '时间无效',
+        link: 'https://uk.finance.yahoo.com/news/invalid-time',
+        providerPublishTime: 'not-a-time',
+        relatedTickers: ['AAPL'],
+      },
+    ],
+  }, 'AAPL');
+
+  assert.equal(items.length, 1);
+  assert.equal(items[0].title.length, 240);
+  assert.equal(items[0].source.length, 120);
+  assert.equal(items[0].url, 'https://finance.yahoo.com/news/apple-launch?id=1');
+  assert.equal(items[0].time, published * 1000);
+  assert.equal(items[0].publishedAt, new Date(published * 1000).toISOString());
+  assert.equal(items[0].primaryTicker, 'T0');
+  assert.equal(items[0].relatedTickers.length, 20);
+  assert.equal(items[0].relatedTickers[0], 'T0');
+  assert.equal(items[0].relatedTickers.includes('AAPL'), true);
+  assert.equal(items[0].relatedTickers.includes('BAD/TICKER'), false);
+});
+
+test('Yahoo 个股资讯拒绝响应结构漂移，空 news 合法且 provider 复用调度请求', async () => {
+  assert.throws(() => parseYahooStockNews({}, 'AAPL'), /结构异常/);
+  assert.throws(() => parseYahooStockNews({ news: {} }, 'AAPL'), /结构异常/);
+  assert.throws(
+    () => parseYahooStockNews({
+      quotes: [{ symbol: '^VIX', quoteType: 'INDEX' }],
+      news: [],
+    }, '^VIX'),
+    /仅支持可确认的美股/,
+  );
+  assert.deepEqual(parseYahooStockNews({
+    quotes: [{ symbol: 'AAPL', quoteType: 'EQUITY' }],
+    news: [],
+  }, 'AAPL'), []);
+
+  const calls = [];
+  const provider = createYahooProvider({
+    fetchText: async (url, options) => {
+      calls.push({ url, options });
+      return JSON.stringify({
+        quotes: [{ symbol: 'AAPL', quoteType: 'EQUITY' }],
+        news: [],
+      });
+    },
+    annotateMarketData,
+    scheduler: { run: (task) => task() },
+    minIntervalMs: 0,
+  });
+  assert.deepEqual(await provider.getStockNews('aapl'), []);
+  const requested = new URL(calls[0].url);
+  assert.equal(requested.pathname, '/v1/finance/search');
+  assert.equal(requested.searchParams.get('q'), 'AAPL');
+  assert.equal(requested.searchParams.get('quotesCount'), '1');
+  assert.equal(requested.searchParams.get('newsCount'), '10');
+  assert.equal(requested.searchParams.get('enableFuzzyQuery'), 'false');
+  assert.deepEqual(calls[0].options, { ua: 'Mozilla/5.0' });
+});
+
 test('新浪个股资讯仅接受新浪域名、清理锚点并拒绝结构漂移', () => {
   const pageUrl = 'https://vip.stock.finance.sina.com.cn/corp/example.phtml';
   const html = `
@@ -681,6 +786,7 @@ function facadeHarness({ marketTurnoverError = false } = {}) {
     getQuotes: async (codes) => codes.map((code) => ({ code, asOf: '2026-07-13T20:00:00Z' })),
     getRank: async (...args) => { calls.push(['yahoo.rank', ...args]); return []; },
     getOverview: async () => { calls.push(['yahoo.overview']); return []; },
+    getStockNews: async (code) => { calls.push(['yahoo.stockNews', code]); return []; },
   };
   const tencent = {
     getIndices: async (market) => { calls.push(['tencent.indices', market]); return []; },
@@ -721,7 +827,7 @@ function facadeHarness({ marketTurnoverError = false } = {}) {
       ? { count: 2, complete: true }
       : { count: 1, complete: false },
     getNews: async () => [],
-    getStockNewsCN: async () => [],
+    getStockNewsCN: async (code) => { calls.push(['sina.stockNewsCN', code]); return []; },
     getProfileCN: async (code) => { calls.push(['sina.profileCN', code]); return { code }; },
     getProfileHK: async (code) => { calls.push(['sina.profileHK', code]); return { code }; },
   };
@@ -754,6 +860,9 @@ test('market-data facade 只负责跨市场路由，并保持批量报价输入�
   await service.getProfile('sh600000');
   await service.getProfile('hk00700');
   await service.getProfile('AAPL');
+  await service.getStockNews('sh600000');
+  await service.getStockNews('AAPL');
+  assert.throws(() => service.getStockNews('hk00700'), /暂不支持港股/);
   const quotes = await service.getQuotes(['AAPL', 'sh600000', 'hk00700', 'MSFT']);
 
   assert.deepEqual(calls, [
@@ -766,6 +875,8 @@ test('market-data facade 只负责跨市场路由，并保持批量报价输入�
     ['sina.profileCN', 'sh600000'],
     ['sina.profileHK', 'hk00700'],
     ['nasdaq.profile', 'AAPL'],
+    ['sina.stockNewsCN', 'sh600000'],
+    ['yahoo.stockNews', 'AAPL'],
   ]);
   assert.deepEqual(quotes.map((quote) => quote.code), ['AAPL', 'sh600000', 'hk00700', 'MSFT']);
   assert.equal(quotes[0].market, 'us');

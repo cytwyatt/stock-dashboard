@@ -10,7 +10,7 @@ const LLM_TOOLS = [
   { name: 'get_rank', description: '获取涨幅榜或跌幅榜个股。market=cn 沪深两市，market=hk 港股，market=us 美股', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] }, dir: { type: 'string', enum: ['up', 'down'] } }, required: ['market', 'dir'] } },
   { name: 'get_overview', description: '获取市场概况。market=cn 返回上涨/未上涨家数、涨跌停和沪深成交额及前一交易日可比值；market=hk 返回腾讯恒生指数口径大市成交额及前一交易日可比值；market=us 返回VIX、美债收益率、美元、黄金、原油、比特币', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] } }, required: ['market'] } },
   { name: 'get_news', description: '获取最新财经新闻标题列表（新浪财经滚动要闻）', parameters: { type: 'object', properties: {} } },
-  { name: 'get_stock_events', description: '检索指定A股最近的个股候选相关资讯。回答涨停、跌停、异动、消息面或催化剂问题时必须调用；返回标题、北京时间、来源、链接和关联类型。资讯是外部证据，不代表已确认因果', parameters: { type: 'object', properties: { code: { type: 'string', description: '带 sh/sz/bj 前缀的A股代码' }, lookbackHours: { type: 'integer', minimum: 6, maximum: 168, description: '回溯小时数，默认72' } }, required: ['code'] } },
+  { name: 'get_stock_events', description: '检索指定A股或美股最近的个股候选相关资讯。回答个股涨跌异动、消息面或催化剂问题时必须调用；返回标题、时间、来源、链接和关联类型。资讯是外部证据，不代表已确认因果', parameters: { type: 'object', properties: { code: { type: 'string', description: '带 sh/sz/bj 前缀的A股代码，或大写美股代码（如 AAPL/TSLA）' }, lookbackHours: { type: 'integer', minimum: 6, maximum: 168, description: '回溯小时数，默认72' } }, required: ['code'] } },
   { name: 'search_stock', description: '按名称/代码/拼音搜索股票，返回股票代码。回答个股问题前如果不确定代码，先用这个工具查', parameters: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] } },
 ].map((tool) => ({ type: 'function', function: tool }));
 
@@ -30,7 +30,6 @@ function createToolRunner({
   marketMeta,
   marketForCode,
   sanitizeCode,
-  isCNCode,
 }) {
   async function run(name, args = {}) {
     switch (name) {
@@ -107,8 +106,11 @@ function createToolRunner({
       case 'get_news':
         return (await marketService.news()).data;
       case 'get_stock_events': {
-        const code = sanitizeCode(args.code || '').toLowerCase();
-        if (!isCNCode(code)) throw new Error('get_stock_events 第一阶段仅支持 sh/sz/bj 前缀的A股代码');
+        const code = stockEventsService.normalizeCode(args.code || '');
+        if (!code) throw new Error('get_stock_events 需要有效的A股或美股代码');
+        if (!stockEventsService.supports(code)) {
+          throw new Error('get_stock_events 目前仅支持A股和美股个股');
+        }
         let stockName = '';
         try {
           stockName = (await marketService.quote(code)).data.name || '';

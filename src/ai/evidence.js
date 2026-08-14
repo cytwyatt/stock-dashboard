@@ -13,7 +13,6 @@ function createEvidenceBuilder({
   stockEventsService,
   marketMeta,
   marketForCode,
-  isCNCode,
   logger = console,
   now = () => Date.now(),
 }) {
@@ -71,7 +70,10 @@ function createEvidenceBuilder({
       stockEvents = {
         asOf: new Date(now()).toISOString(),
         stock: stockContext,
-        coverage: { supported: isCNCode(stockContext.code), error: '个股资讯源暂时不可用' },
+        coverage: {
+          supported: stockEventsService.supports(stockContext.code),
+          error: '个股资讯源暂时不可用',
+        },
         events: [],
       };
     }

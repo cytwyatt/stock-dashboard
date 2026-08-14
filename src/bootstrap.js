@@ -177,7 +177,7 @@ function createApplication({
   });
   const stockEventsService = createStockEventsService({
     cached,
-    getStockNewsCN: marketData.getStockNewsCN,
+    getStockNews: marketData.getStockNews,
     isCNCode,
     isHKCode,
     isKnownHKCode,
@@ -226,14 +226,12 @@ function createApplication({
     marketMeta,
     marketForCode,
     sanitizeCode,
-    isCNCode,
   });
   const evidenceBuilder = createEvidenceBuilder({
     marketService,
     stockEventsService,
     marketMeta,
     marketForCode,
-    isCNCode,
     logger,
   });
   const chatService = createChatService({

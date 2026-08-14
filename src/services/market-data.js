@@ -51,7 +51,7 @@ function createMarketData({
   if (typeof isHKCode !== 'function') throw new TypeError('isHKCode must be a function');
   if (typeof isTXCode !== 'function') throw new TypeError('isTXCode must be a function');
 
-  for (const method of ['getIndices', 'getMinute', 'getKline', 'getQuote', 'getQuotes', 'getRank', 'getOverview']) {
+  for (const method of ['getIndices', 'getMinute', 'getKline', 'getQuote', 'getQuotes', 'getRank', 'getOverview', 'getStockNews']) {
     requireMethod(yahoo, method, 'yahoo');
   }
   for (const method of ['getIndices', 'getMinute', 'getKline', 'getSectors', 'getMarketTurnover', 'getQuote', 'getQuotes', 'searchStocks']) {
@@ -185,6 +185,11 @@ function createMarketData({
   const getProfile = (code) => isCNCode(code)
     ? sina.getProfileCN(code)
     : isHKCode(code) ? sina.getProfileHK(code) : nasdaq.getProfile(code);
+  const getStockNews = (code) => {
+    if (isCNCode(code)) return sina.getStockNewsCN(code);
+    if (isHKCode(code)) throw new Error('个股资讯目前暂不支持港股');
+    return yahoo.getStockNews(code);
+  };
 
   return {
     getIndices,
@@ -205,7 +210,7 @@ function createMarketData({
     getOverviewHK,
     getOverviewUS: () => yahoo.getOverview(),
     getNews: (count) => sina.getNews(count),
-    getStockNewsCN: (code) => sina.getStockNewsCN(code),
+    getStockNews,
     countLimit: (dir) => sina.countLimit(dir),
   };
 }
