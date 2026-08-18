@@ -171,7 +171,7 @@ test('LLM 配置保持文件值、环境变量优先级、默认值与非法 URL
     baseUrl: 'https://api.deepseek.com/v1',
     apiKey: '',
     model: 'deepseek-v4-flash',
-    marketReviewModel: 'deepseek-v4-pro',
+    marketReviewModel: 'deepseek-v4-flash',
     fallbackMarketReviewModel: 'deepseek-v4-flash',
   });
   for (const invalidShape of ['null', '[]', '"text"']) {
@@ -180,11 +180,11 @@ test('LLM 配置保持文件值、环境变量优先级、默认值与非法 URL
   }
 });
 
-test('新 DeepSeek 配置推荐 V4 Pro，已有配置缺少复盘字段时保持沿用问答模型', (t) => {
+test('新 DeepSeek 配置的问答与复盘默认统一使用 V4 Flash', (t) => {
   const dataDir = tempDir(t);
   const store = createLLMConfigStore({ dataDir, fs, jsonFile: jsonFile(dataDir), env: {} });
 
-  assert.equal(store.getLLMConfig().marketReviewModel, 'deepseek-v4-pro');
+  assert.equal(store.getLLMConfig().marketReviewModel, 'deepseek-v4-flash');
 
   store.writeLLMConfig({
     baseUrl: 'https://api.deepseek.com/v1', apiKey: '', model: 'deepseek-v4-flash',

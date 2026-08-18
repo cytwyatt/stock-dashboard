@@ -58,10 +58,8 @@ PORT=8080 node server.js
 
 在页面中打开 **AI → 模型设置**，填写 API Key 即可。支持 DeepSeek、Kimi、通义、智谱、OpenAI 及其他 OpenAI 兼容接口。
 
-问答与盘后复盘可使用不同模型。DeepSeek 用户推荐：
-
-- `deepseek-v4-flash`：日常问答和工具调用
-- `deepseek-v4-pro`：盘后深度复盘
+问答与盘后复盘可使用不同模型。DeepSeek 用户推荐两者统一使用
+`deepseek-v4-flash`，覆盖日常问答、工具调用和盘后复盘。
 
 也可使用环境变量：
 

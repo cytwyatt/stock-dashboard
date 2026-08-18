@@ -4,7 +4,7 @@ const path = require('node:path');
 
 const DEFAULT_LLM_BASE_URL = 'https://api.deepseek.com/v1';
 const DEFAULT_LLM_MODEL = 'deepseek-v4-flash';
-const DEFAULT_DEEPSEEK_REVIEW_MODEL = 'deepseek-v4-pro';
+const DEFAULT_DEEPSEEK_REVIEW_MODEL = 'deepseek-v4-flash';
 
 function normalizeLLMBaseUrl(value) {
   const parsed = new URL(String(value || '').trim());
