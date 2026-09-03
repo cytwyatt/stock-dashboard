@@ -1,6 +1,7 @@
 'use strict';
 
 const { summarizeIndexHistory, round } = require('../domain/market-review');
+const { hasLLMConfig } = require('./llm-client');
 const {
   MARKET_LABELS,
   compactQuote,
@@ -1765,7 +1766,7 @@ function createMarketReviewService({
         ...sharedConfig,
         model: sharedConfig.marketReviewModel || sharedConfig.model,
       };
-      if (!config.apiKey) {
+      if (!hasLLMConfig(config)) {
         return latest
           ? readyEntry(latest, { nextReviewStatus: 'unconfigured' })
           : stateEntry(market, 'unconfigured', '配置模型后，将在市场收盘并完成数据校验后生成每日复盘。');

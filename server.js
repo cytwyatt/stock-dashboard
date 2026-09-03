@@ -23,7 +23,19 @@ const {
   compatibility,
 } = application;
 
-if (require.main === module) startServer();
+if (require.main === module) {
+  startServer();
+  let stopping = false;
+  const shutdown = () => {
+    if (stopping) return;
+    stopping = true;
+    const deadline = setTimeout(() => process.exit(1), 5000);
+    deadline.unref();
+    application.stopServer().then(() => clearTimeout(deadline)).catch(() => { process.exitCode = 1; });
+  };
+  process.once('SIGTERM', shutdown);
+  process.once('SIGINT', shutdown);
+}
 
 module.exports = {
   server,

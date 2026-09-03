@@ -66,6 +66,7 @@ const { createChatStore } = require('./storage/chat-store');
 const { createMarketReviewStore } = require('./storage/market-review-store');
 
 const { createLLMClient } = require('./ai/llm-client');
+const { createCodexClient } = require('./ai/codex-client');
 const { createMarketReviewService } = require('./ai/market-review-service');
 const { LLM_TOOLS, serializeToolResult, createToolRunner } = require('./ai/tools');
 const prompts = require('./ai/prompts');
@@ -209,7 +210,8 @@ function createApplication({
     jsonFile,
   });
 
-  const llmClient = createLLMClient({ fetchImpl });
+  const codexClient = createCodexClient({ env });
+  const llmClient = createLLMClient({ fetchImpl, codexClient });
   const marketReviewService = createMarketReviewService({
     marketService,
     marketReviewStore,
@@ -298,7 +300,17 @@ function createApplication({
     });
   }
 
+  async function stopServer() {
+    if (warmTimer) clearInterval(warmTimer);
+    if (reviewTimer) clearInterval(reviewTimer);
+    warmTimer = null;
+    reviewTimer = null;
+    await codexClient.close();
+    if (server.listening) await new Promise((resolve) => server.close(resolve));
+  }
+
   server.on('close', () => {
+    codexClient.close().catch(() => {});
     if (warmTimer) clearInterval(warmTimer);
     if (reviewTimer) clearInterval(reviewTimer);
     warmTimer = null;
@@ -313,6 +325,7 @@ function createApplication({
     dataDir,
     server,
     startServer,
+    stopServer,
     cache,
     cached,
     cachedEntry,

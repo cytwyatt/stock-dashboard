@@ -227,6 +227,25 @@
         </div>
       </div>
       <div class="llm-form">
+        <label for="llmTransport">接入方式</label>
+        <select id="llmTransport">
+          <option value="api">API Key（按服务商用量计费）</option>
+          <option value="codex">ChatGPT 订阅 / Codex（实验性）</option>
+        </select>
+        <div id="llmCodexFields" style="display:none">
+          <label for="llmCodexModel">Codex 问答模型</label>
+          <input id="llmCodexModel" placeholder="gpt-5.6-luna" autocomplete="off">
+          <label for="llmCodexReviewModel">Codex 复盘模型（可选）</label>
+          <input id="llmCodexReviewModel" placeholder="留空沿用问答模型" autocomplete="off">
+          <label for="llmCodexEffort">推理强度</label>
+          <select id="llmCodexEffort">
+            <option value="low">低（默认，节省额度）</option>
+            <option value="medium">中</option>
+            <option value="high">高（消耗更多额度）</option>
+          </select>
+          <div class="llm-hint">仅供本人私有使用。服务器需安装 Codex 0.151.0 并通过 ChatGPT 登录（codex login --device-auth）。与日常 Codex 共享订阅额度，不是无限免费。保留原 API 配置，但不会自动回退到付费 API。任一额度窗口的账号共享用量达到 50% 时暂停新调用；此阈值无法保证并发使用时不消耗账户已有加购额度。复盘只生成尚未完成的交易日。</div>
+        </div>
+        <div id="llmApiFields">
         <label>服务商</label>
         <select id="llmProvider"></select>
         <label>模型</label>
@@ -240,6 +259,7 @@
         <label>接口地址</label>
         <input id="llmBaseUrl" placeholder="https://…/v1" autocomplete="off">
         <div class="llm-hint" id="llmHint"></div>
+        </div>
         <div class="llm-btns">
           <button class="llm-btn secondary" id="llmTest">保存并测试</button>
           <button class="llm-btn primary" id="llmSave">保存</button>

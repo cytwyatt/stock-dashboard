@@ -1,6 +1,7 @@
 'use strict';
 
 const { readBody, sendJSON, sendMarketJSON, sseSend } = require('./response');
+const { hasLLMConfig } = require('../ai/llm-client');
 
 function maskKey(key) {
   if (!key) return '';
@@ -140,13 +141,21 @@ function createHttpHandler({
 
       if (pathname === '/api/llm-config') {
         if (req.method === 'GET') {
-          const config = llmConfigStore.getLLMConfig();
+          const activeConfig = llmConfigStore.getLLMConfig();
+          const config = llmConfigStore.getAPIConfig?.() || activeConfig;
           const stored = llmConfigStore.getStoredLLMConfig();
           const storedModel = typeof stored.model === 'string' ? stored.model.trim() : '';
           const storedMarketReviewModel = typeof stored.marketReviewModel === 'string'
             ? stored.marketReviewModel.trim().slice(0, 100)
             : '';
           return sendJSON(res, 200, {
+            transport: activeConfig.transport || 'api',
+            transportManaged: !!env.LLM_TRANSPORT,
+            codex: {
+              model: env.LLM_MODEL || stored.codexModel || 'gpt-5.6-luna',
+              marketReviewModel: env.LLM_MARKET_REVIEW_MODEL || env.LLM_MODEL || stored.codexMarketReviewModel || '',
+              effort: stored.codexEffort || 'low',
+            },
             baseUrl: config.baseUrl,
             model: config.model,
             marketReviewModel: storedMarketReviewModel,
@@ -167,8 +176,37 @@ function createHttpHandler({
           if (!body || typeof body !== 'object' || Array.isArray(body)) {
             return sendJSON(res, 400, { error: '请求体格式不正确' });
           }
-          const current = llmConfigStore.getLLMConfig();
+          const activeConfig = llmConfigStore.getLLMConfig();
+          const current = llmConfigStore.getAPIConfig?.() || activeConfig;
           const stored = llmConfigStore.getStoredLLMConfig();
+          const transport = body.transport || activeConfig.transport || 'api';
+          if (!['api', 'codex'].includes(transport)) return sendJSON(res, 400, { error: '未知接入方式' });
+          if (env.LLM_TRANSPORT && transport !== env.LLM_TRANSPORT) {
+            return sendJSON(res, 400, { error: '接入方式由环境变量管理' });
+          }
+          if (transport === 'codex') {
+            const model = typeof body.codexModel === 'string' ? body.codexModel.trim() : stored.codexModel || 'gpt-5.6-luna';
+            const reviewModel = typeof body.codexMarketReviewModel === 'string' ? body.codexMarketReviewModel.trim() : stored.codexMarketReviewModel || '';
+            const effort = body.codexEffort || stored.codexEffort || 'low';
+            if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(model)
+                || (reviewModel && !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(reviewModel))
+                || !['low', 'medium', 'high'].includes(effort)) {
+              return sendJSON(res, 400, { error: 'Codex 模型或推理强度不合法' });
+            }
+            if ((env.LLM_MODEL && model !== env.LLM_MODEL)
+                || ((env.LLM_MARKET_REVIEW_MODEL || env.LLM_MODEL)
+                  && reviewModel !== (env.LLM_MARKET_REVIEW_MODEL || env.LLM_MODEL))) {
+              return sendJSON(res, 400, { error: '模型由环境变量管理' });
+            }
+            llmConfigStore.writeLLMConfig({
+              ...stored, transport: 'codex', codexModel: model,
+              codexMarketReviewModel: reviewModel, codexEffort: effort,
+            });
+            return sendJSON(res, 200, {
+              ok: true, configured: true, transport: 'codex',
+              message: '已选择 Codex；请测试服务器登录、模型和订阅额度。',
+            });
+          }
           const rawBaseUrl = String(body.baseUrl || '').trim().slice(0, 200);
           const model = String(body.model || '').trim().slice(0, 100);
           const hasMarketReviewModel = Object.prototype.hasOwnProperty.call(body, 'marketReviewModel');
@@ -203,11 +241,14 @@ function createHttpHandler({
           const apiKey = env.LLM_API_KEY
             ? previousFileKey
             : enteredKey || (baseUrl === current.baseUrl ? current.apiKey : '');
-          llmConfigStore.writeLLMConfig({ baseUrl, apiKey, model, marketReviewModel });
+          llmConfigStore.writeLLMConfig({
+            ...stored, baseUrl, apiKey, model, marketReviewModel,
+            ...(stored.transport || body.transport ? { transport: 'api' } : {}),
+          });
           const effective = llmConfigStore.getLLMConfig();
           return sendJSON(res, 200, {
             ok: true,
-            configured: !!effective.apiKey,
+            configured: hasLLMConfig(effective),
             keyMask: maskKey(effective.apiKey),
             model: effective.model,
             effectiveMarketReviewModel: effective.marketReviewModel,
@@ -254,7 +295,16 @@ function createHttpHandler({
           'Cache-Control': 'no-store',
           Connection: 'keep-alive',
         });
-        await chatService.run(prepared, (event) => sseSend(res, event));
+        const controller = new AbortController();
+        const disconnected = () => controller.abort();
+        res.once?.('close', disconnected);
+        try {
+          await chatService.run(prepared, (event) => {
+            if (!controller.signal.aborted) sseSend(res, event);
+          }, { signal: controller.signal });
+        } finally {
+          res.removeListener?.('close', disconnected);
+        }
         return res.end();
       }
 

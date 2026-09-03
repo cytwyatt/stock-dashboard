@@ -1,6 +1,6 @@
 'use strict';
 
-const { isOfficialDeepSeekV4 } = require('./llm-client');
+const { isOfficialDeepSeekV4, hasLLMConfig } = require('./llm-client');
 
 const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
 const MAX_TOOL_ROUNDS = 6;
@@ -87,7 +87,7 @@ function createChatService({
     };
   }
 
-  async function run(prepared, emit) {
+  async function run(prepared, emit, { signal } = {}) {
     if (!prepared || typeof emit !== 'function') throw new TypeError('prepared and emit are required');
     const {
       sessionId,
@@ -99,7 +99,8 @@ function createChatService({
     return withSessionLock(sessionId, async () => {
       const config = llmConfigStore.getLLMConfig();
       try {
-        if (!config.apiKey) {
+        if (signal?.aborted) return;
+        if (!hasLLMConfig(config)) {
           emit({
             type: 'error',
             message: '尚未配置模型 API Key——点击「⚙ 模型设置」，选择服务商并填入 Key 即可使用。',
@@ -158,11 +159,12 @@ function createChatService({
 
         let answer = '';
         for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+          if (signal?.aborted) return;
           const response = await llmClient.complete(
             config,
             messages,
             LLM_TOOLS,
-            officialDeepSeekV4 ? { thinking: 'disabled' } : {},
+            config.transport === 'codex' ? { signal } : officialDeepSeekV4 ? { thinking: 'disabled' } : {},
           );
           if (response.tool_calls && response.tool_calls.length) {
             messages.push(response);
@@ -233,6 +235,7 @@ function createChatService({
         }
 
         const assistantCreatedAt = now();
+        if (signal?.aborted) return;
         session.messages.push({ role: 'assistant', content: answer, createdAt: assistantCreatedAt });
         session.updatedAt = assistantCreatedAt;
         const latestStore = chatStore.readChats();
@@ -249,6 +252,7 @@ function createChatService({
           title: session.title,
         });
       } catch (error) {
+        if (signal?.aborted) return;
         logger.error('[chat]', error.message);
         emit({ type: 'error', message: error.message });
       }

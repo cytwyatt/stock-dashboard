@@ -26,6 +26,7 @@ function normalizeUsage(value) {
 }
 
 function isOfficialDeepSeekV4(config) {
+  if (config?.transport === 'codex') return false;
   try {
     return new URL(String(config?.baseUrl || '')).hostname.toLowerCase() === 'api.deepseek.com'
       && /^deepseek-v4-(?:flash|pro)$/.test(String(config?.model || ''));
@@ -34,8 +35,16 @@ function isOfficialDeepSeekV4(config) {
   }
 }
 
-function createLLMClient({ fetchImpl = global.fetch, now = Date.now } = {}) {
+function hasLLMConfig(config) {
+  return config?.transport === 'codex' ? !!config.model : !!config?.apiKey;
+}
+
+function createLLMClient({ fetchImpl = global.fetch, now = Date.now, codexClient } = {}) {
   async function testConfig(cfg) {
+    if (cfg.transport === 'codex') {
+      if (!codexClient) return { ok: false, message: 'Codex 接入未启用' };
+      return codexClient.testConfig(cfg);
+    }
     if (!cfg.apiKey) return { ok: false, message: '尚未填写 API Key' };
     try {
       const res = await fetchImpl(`${cfg.baseUrl}/chat/completions`, {
@@ -68,6 +77,10 @@ function createLLMClient({ fetchImpl = global.fetch, now = Date.now } = {}) {
   }
 
   async function complete(cfg, messages, tools, options = {}) {
+    if (cfg.transport === 'codex') {
+      if (!codexClient) throw new Error('Codex 接入未启用；不会回退至付费 API');
+      return codexClient.complete(cfg, messages, tools, options);
+    }
     const hasTools = Array.isArray(tools) && tools.length > 0;
     const officialDeepSeekV4 = isOfficialDeepSeekV4(cfg);
     const requestedThinking = options.thinking === 'enabled' || options.thinking === 'disabled'
@@ -136,5 +149,6 @@ module.exports = {
   normalizeLLMBaseUrl,
   normalizeUsage,
   isOfficialDeepSeekV4,
+  hasLLMConfig,
   createLLMClient,
 };

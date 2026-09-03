@@ -42,7 +42,7 @@ function createLLMConfigStore({ dataDir, fs, jsonFile, env = {} }) {
     catch { return {}; }
   }
 
-  function getLLMConfig() {
+  function getAPIConfig() {
     const config = getStoredLLMConfig();
     const rawBaseUrl = env.LLM_BASE_URL || config.baseUrl || DEFAULT_LLM_BASE_URL;
     let baseUrl;
@@ -70,6 +70,20 @@ function createLLMConfigStore({ dataDir, fs, jsonFile, env = {} }) {
     };
   }
 
+  function getLLMConfig() {
+    const config = getStoredLLMConfig();
+    const transport = env.LLM_TRANSPORT || config.transport || 'api';
+    if (!['api', 'codex'].includes(transport)) throw new Error('LLM_TRANSPORT 必须为 api 或 codex');
+    if (transport !== 'codex') return getAPIConfig();
+    const model = env.LLM_MODEL || config.codexModel || 'gpt-5.6-luna';
+    return {
+      transport: 'codex', baseUrl: '', apiKey: '', model,
+      marketReviewModel: env.LLM_MARKET_REVIEW_MODEL || env.LLM_MODEL || config.codexMarketReviewModel || model,
+      fallbackMarketReviewModel: model,
+      codexEffort: ['low', 'medium', 'high'].includes(config.codexEffort) ? config.codexEffort : 'low',
+    };
+  }
+
   function writeLLMConfig(config) {
     jsonFile.writeDataJSON(file, config);
   }
@@ -78,6 +92,7 @@ function createLLMConfigStore({ dataDir, fs, jsonFile, env = {} }) {
     file,
     getStoredLLMConfig,
     getLLMConfig,
+    getAPIConfig,
     writeLLMConfig,
     normalizeLLMBaseUrl,
   };

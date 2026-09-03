@@ -2715,12 +2715,26 @@ function setLLMStatus(text, ok) {
   el.className = `llm-status ${ok === true ? 'ok' : ok === false ? 'err' : ''}`;
 }
 
+function showLLMTransport() {
+  const codex = $('#llmTransport').value === 'codex';
+  $('#llmApiFields').style.display = codex ? 'none' : 'block';
+  $('#llmCodexFields').style.display = codex ? 'block' : 'none';
+  $('#llmTest').textContent = codex ? '保存并检查登录 / 额度' : '保存并测试';
+  setLLMStatus('');
+}
+
 async function openLLMConfig() {
   $('#llmProvider').innerHTML = LLM_PROVIDERS.map((p) => `<option value="${p.id}">${p.name}</option>`).join('');
   setLLMStatus('');
   $('#llmKey').value = '';
   try {
     const cfg = await api('/api/llm-config');
+    $('#llmTransport').value = cfg.transport || 'api';
+    $('#llmTransport').disabled = cfg.transportManaged === true;
+    $('#llmCodexModel').value = cfg.codex?.model || 'gpt-5.6-luna';
+    $('#llmCodexReviewModel').value = cfg.codex?.marketReviewModel || '';
+    $('#llmCodexEffort').value = cfg.codex?.effort || 'low';
+    showLLMTransport();
     const match = LLM_PROVIDERS.find((p) => p.baseUrl && cfg.baseUrl.startsWith(p.baseUrl.replace(/\/v1$/, '')));
     fillLLMProvider(match ? match.id : 'custom', true);
     $('#llmBaseUrl').value = cfg.baseUrl;
@@ -2736,11 +2750,15 @@ async function openLLMConfig() {
         ? `下一份复盘单独使用 ${reviewModelValue}；清空后使用 ${fallbackReviewModel}。`
         : `留空时使用 ${fallbackReviewModel}；只影响下一份尚未生成的复盘。`;
     $('#llmKey').placeholder = cfg.configured ? `已保存 ${cfg.keyMask}（留空表示不修改）` : '请输入 API Key';
-    if (!cfg.configured) setLLMStatus('尚未配置 API Key', false);
+    if (cfg.transport === 'codex') setLLMStatus('Codex 模式已选择；可检查服务器登录和订阅额度。');
+    else if (!cfg.configured) setLLMStatus('尚未配置 API Key', false);
     else if (match?.id === 'deepseek' && ['deepseek-chat', 'deepseek-reasoner'].includes(cfg.model)) {
       setLLMStatus('当前使用即将停用的 DeepSeek 旧模型名称，请改为 V4 Flash 或 V4 Pro。', false);
     }
   } catch (e) {
+    $('#llmTransport').value = 'api';
+    $('#llmTransport').disabled = false;
+    showLLMTransport();
     fillLLMProvider('deepseek');
     $('#llmReviewModel').disabled = false;
   }
@@ -2748,12 +2766,19 @@ async function openLLMConfig() {
 }
 
 async function saveLLMConfig() {
-  const body = {
+  const codex = $('#llmTransport').value === 'codex';
+  const body = codex ? {
+    transport: 'codex',
+    codexModel: $('#llmCodexModel').value.trim(),
+    codexMarketReviewModel: $('#llmCodexReviewModel').value.trim(),
+    codexEffort: $('#llmCodexEffort').value,
+  } : {
+    transport: 'api',
     baseUrl: $('#llmBaseUrl').value.trim(),
     model: $('#llmModel').value.trim(),
     apiKey: $('#llmKey').value.trim(),
   };
-  if (!$('#llmReviewModel').disabled) {
+  if (!codex && !$('#llmReviewModel').disabled) {
     body.marketReviewModel = $('#llmReviewModel').value.trim();
   }
   const res = await fetch('/api/llm-config', {
@@ -2881,10 +2906,11 @@ $('#llmModal').addEventListener('click', (e) => {
   if (e.target === $('#llmModal')) $('#llmModal').style.display = 'none';
 });
 $('#llmProvider').addEventListener('change', (e) => fillLLMProvider(e.target.value));
+$('#llmTransport').addEventListener('change', showLLMTransport);
 $('#llmSave').addEventListener('click', async () => {
   try {
     const j = await saveLLMConfig();
-    setLLMStatus(j.configured
+    setLLMStatus(j.transport === 'codex' ? j.message : j.configured
       ? '✓ 已保存；AI 问答立即生效，复盘模型用于下一份复盘'
       : '已保存，但还没有 API Key', j.configured);
     if (j.configured && ['cn', 'hk', 'us'].includes(state.market)) {

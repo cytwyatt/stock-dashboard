@@ -14,6 +14,8 @@ const { createStaticServer } = require('../src/http/static');
 const { sendJSON } = require('../src/http/response');
 const { createHttpHandler } = require('../src/http/router');
 const { normalizeProfileCode } = require('../src/core/symbols');
+const { createLLMConfigStore } = require('../src/storage/llm-config-store');
+const { createJsonFileStorage } = require('../src/storage/json-file');
 
 function tempDir(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'market-http-'));
@@ -502,6 +504,8 @@ test('模型配置 API 分离问答与盘后复盘模型、兼容旧客户端并
   const get = mockResponse();
   await handler(mockRequest({ url: '/api/llm-config' }), get);
   assert.deepEqual(JSON.parse(get.body), {
+    transport: 'api', transportManaged: false,
+    codex: { model: 'gpt-5.6-luna', marketReviewModel: '', effort: 'low' },
     baseUrl: 'https://api.deepseek.com/v1',
     model: 'deepseek-v4-flash',
     marketReviewModel: 'custom-review-model',
@@ -570,4 +574,47 @@ test('模型配置 API 分离问答与盘后复盘模型、兼容旧客户端并
   }), managed);
   assert.equal(managed.status, 400);
   assert.match(JSON.parse(managed.body).error, /环境变量/);
+});
+
+test('Codex 配置 HTTP 往返保留 API 密钥；查询不泄露秘密；只测试已选择模式', async (t) => {
+  const dataDir = tempDir(t);
+  const env = {};
+  const store = createLLMConfigStore({ dataDir, fs, env,
+    jsonFile: createJsonFileStorage({ dataDir, fs, crypto }),
+  });
+  const api = { baseUrl: 'https://api.example/v1', apiKey: 'keep-private-key', model: 'api-model', marketReviewModel: 'api-review' };
+  store.writeLLMConfig(api);
+  const tested = [];
+  const handler = createHttpHandler({
+    port: 3888, auth: createAuth(), staticServer: {}, marketService: {}, chatService: {},
+    llmConfigStore: store, llmClient: { async testConfig(config) { tested.push(config); return { ok: true, message: 'checked' }; } },
+    watchlistStore: {}, chatStore: {}, marketMeta() {}, sanitizeCode: (v) => v, marketForCode: () => 'us', env,
+  });
+  const call = async (method, body, url = '/api/llm-config') => {
+    const res = mockResponse();
+    await handler(mockRequest({ url, method, body: body ? JSON.stringify(body) : '' }), res);
+    assert.doesNotMatch(String(res.body), /keep-private-key/);
+    return { status: res.status, body: JSON.parse(res.body) };
+  };
+  assert.equal((await call('POST', {
+    transport: 'codex', codexModel: 'codex-model', codexMarketReviewModel: 'codex-review', codexEffort: 'medium',
+    apiKey: 'must-ignore', baseUrl: 'https://must-not-change.test', executable: '/bin/sh',
+  })).status, 200);
+  assert.equal(store.getStoredLLMConfig().apiKey, api.apiKey);
+  assert.equal(store.getStoredLLMConfig().baseUrl, api.baseUrl);
+  assert.equal(store.getStoredLLMConfig().executable, undefined);
+  const get = (await call('GET')).body;
+  assert.equal(get.transport, 'codex');
+  assert.equal(get.model, 'api-model');
+  assert.equal(get.codex.model, 'codex-model');
+  assert.equal((await call('POST', null, '/api/llm-config/test')).body.ok, true);
+  assert.deepEqual(tested.map((c) => [c.transport, c.model, c.apiKey]), [
+    ['codex', 'codex-model', ''], ['codex', 'codex-review', ''],
+  ]);
+  assert.equal((await call('POST', { transport: 'codex', codexModel: 'bad model' })).status, 400);
+  assert.equal((await call('POST', { transport: 'api', baseUrl: api.baseUrl, model: api.model, apiKey: '' })).status, 200);
+  assert.equal(store.getLLMConfig().apiKey, api.apiKey);
+  assert.equal(store.getStoredLLMConfig().codexModel, 'codex-model');
+  env.LLM_TRANSPORT = 'api';
+  assert.equal((await call('POST', { transport: 'codex' })).status, 400);
 });

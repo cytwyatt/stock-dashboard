@@ -237,6 +237,19 @@ test('盘后复盘 v2 提示词固定综合研判与条件式展望契约', () =
   assert.match(prompt, /基准判断/);
 });
 
+test('Codex 复盘不要求 API Key，仍只生成一次并保留 JSON 校验和元数据', async () => {
+  const h = createHarness({ apiKey: '', llmConfig: { transport: 'codex', model: 'codex-model' },
+    completionMeta: { finishReason: 'stop', model: 'codex-model', durationMs: 100, usage: { totalTokens: 1000 } },
+  });
+  const first = await h.service.ensureReview('cn');
+  assert.equal(first.data.status, 'ready');
+  await h.service.ensureReview('cn');
+  assert.equal(h.calls.llm, 1);
+  assert.equal(h.llmRequests[0].config.transport, 'codex');
+  assert.equal(h.llmRequests[0].tools, null);
+  assert.equal(h.llmRequests[0].options.includeMeta, true);
+});
+
 test('综合研判允许数字与明确方向，仍拒绝保证、概率、投资建议和无来源事件归因', () => {
   const allowed = {
     allowedEvidenceRefs: ['indices', 'indexHistory', 'overview'],

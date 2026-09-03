@@ -116,6 +116,23 @@ test('未配置 API Key 只输出错误，不创建或写入会话', async () =>
   assert.equal(h.llmCalls.length, 0);
 });
 
+test('Codex 无 API Key 也执行问答，保留自动研究注入与原工具循环', async () => {
+  const h = harness({
+    config: { transport: 'codex', apiKey: '', model: 'codex-model' },
+    automaticResearch: async () => ({ id: 'first-request-evidence' }),
+    responses: [
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'fixture', arguments: '{}' } }] },
+      { role: 'assistant', content: '订阅答案' },
+    ],
+  });
+  const events = [];
+  await h.service.run(h.service.prepare({ message: '分析一下' }), (e) => events.push(e));
+  assert(h.llmCalls[0][1].some((m) => m.content === 'RESEARCH:first-request-evidence'));
+  assert.equal(h.toolCalls.length, 1);
+  assert.equal(h.llmCalls.length, 2);
+  assert.equal(events.at(-1).content, '订阅答案');
+});
+
 test('run 先持久化用户消息，并行自动证据，再按系统消息与最近12条历史调用模型', async () => {
   const oldMessages = Array.from({ length: 14 }, (_, index) => ({
     role: index % 2 ? 'assistant' : 'user', content: `m${index}`,

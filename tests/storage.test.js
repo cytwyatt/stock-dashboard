@@ -26,6 +26,34 @@ const sanitizeCode = (value) => String(value ?? '').replace(/[^a-zA-Z0-9.^=-]/g,
 const isCNCode = (code) => /^(sh|sz|bj)\d{6}$/.test(code);
 const isKnownHKCode = (code) => /^hk(\d{5}|HSI|HSCEI|HSTECH)$/.test(code);
 
+test('Codex 配置与 API 配置分离，切换保留密钥，环境变量仍优先', (t) => {
+  const dataDir = tempDir(t);
+  const env = {};
+  const store = createLLMConfigStore({ dataDir, fs, jsonFile: jsonFile(dataDir), env });
+  const saved = { transport: 'codex', baseUrl: 'https://api.example/v1', apiKey: 'private',
+    model: 'api-model', marketReviewModel: 'api-review', codexModel: 'codex-model',
+    codexMarketReviewModel: 'codex-review', codexEffort: 'medium' };
+  store.writeLLMConfig(saved);
+  assert.deepEqual(store.getLLMConfig(), {
+    transport: 'codex', baseUrl: '', apiKey: '', model: 'codex-model',
+    marketReviewModel: 'codex-review', fallbackMarketReviewModel: 'codex-model', codexEffort: 'medium',
+  });
+  assert.equal(store.getAPIConfig().apiKey, 'private');
+  env.LLM_MODEL = 'env-codex';
+  assert.equal(store.getLLMConfig().model, 'env-codex');
+  assert.equal(store.getLLMConfig().marketReviewModel, 'env-codex');
+  env.LLM_MARKET_REVIEW_MODEL = 'env-review';
+  assert.equal(store.getLLMConfig().marketReviewModel, 'env-review');
+  delete env.LLM_MODEL;
+  delete env.LLM_MARKET_REVIEW_MODEL;
+  env.LLM_TRANSPORT = 'api';
+  assert.equal(store.getLLMConfig().model, 'api-model');
+  assert.equal(store.getLLMConfig().apiKey, 'private');
+  assert.deepEqual(store.getStoredLLMConfig(), saved);
+  env.LLM_TRANSPORT = 'bad';
+  assert.throws(() => store.getLLMConfig(), /LLM_TRANSPORT/);
+});
+
 test('仅导入 storage 模块不会读取 MARKET_DATA_DIR 或创建文件', () => {
   const marker = path.join(os.tmpdir(), `market-storage-import-${process.pid}-${Date.now()}`);
   const previous = process.env.MARKET_DATA_DIR;

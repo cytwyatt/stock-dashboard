@@ -81,6 +81,8 @@ ssh ubuntu-ts 'tailscale funnel --https=8443 off'         # 关公网（私网�
 
 ## AI 复盘与问答（LLM）
 
+- **Codex 订阅模式**：`transport=codex` 的问答/复盘模型分别存 `codexModel/codexMarketReviewModel`，与原 API 配置分离，`LLM_TRANSPORT` 可强制模式，`LLM_MODEL/LLM_MARKET_REVIEW_MODEL` 仍覆盖当前模式。`src/ai/codex-client.js` 仅支持实测 CLI 0.151.0，通过私有 stdio、临时会话与无环境访问的受控 JSON 动作接入，实际查询继续由原工具白名单与最多6轮循环执行。权限 profile 必须在子进程启动参数中定义（只传 thread/start 会在 turn/start 重载时丢失），关闭原生命令/插件/hooks/记忆/子代理；发现启用的外部 MCP 或非官方路由必须拒绝。只接受 ChatGPT 登录；额度未知或任一额度窗口的账号共享用量达到50%时暂停新调用，绝不自动 API fallback、购买额度或兑换重置。这个阈值不是账户计费硬上限；Codex 无等价 max_tokens 硬限制，超时与完成后 token 超标校验不能撤销已用额度。连接检查不生成回答，真实联调只使用明确的测试数据；协议 mock、配置往返及复盘一日一次测试必须覆盖订阅模式。
+
 - OpenAI 兼容协议 + 原生 fetch，**不引入 SDK**（保持零依赖）。工具定义和执行器位于 `src/ai/tools.js`——共享行情、研究卡和滚动新闻调用 `marketService`；个股事件调用 `stockEventsService` 的专用证据缓存，不得在工具分支自行定义 key/TTL。
 - 盘后复盘只允许一次模型请求返回严格 JSON：卡片概要与详情分节同时生成，模型输出永远不能作为 HTML/Markdown 直出。每条详情必须引用实际存在的行情组件；`analysis` 显式标记模型基于行情的趋势、结构与风险判断，`reported_cause` 只能出现在事件线索且必须同时引用 `news` 与白名单新闻 ID。所有证据必须冻结到 `reviewDate`，晚于该交易日的新闻或跨资产快照必须排除；次要指数旧缓存或日期不齐时只能降级，不能混入当日结论。指数/ETF/宏观代理/涨跌榜的覆盖边界必须显式保留，不能把代理或样本冒充全市场统计。
 - 复盘 schema v2 的 `synthesisOutlook` 必须在分项事实之外提炼跨组件主线、相互确认、背离和脆弱点，并给出未来一至五个交易日的基准/偏强/偏弱三种情景；基准情景必须先给出模型当前最有证据支持的明确方向，再写成立条件与失效信号，核心指数与多周期日线可用时不得因其他组件缺失而默认“数据不足”。允许在显著文本和前瞻中引用输入已有的行情数字；禁止编造数字、数字化涨跌概率、目标价、保证式涨跌、买卖、止盈止损、仓位或收益承诺。综合研判与情景只能引用收盘对齐的 `evidenceRefs`，引用 `news` 时还必须带白名单 `citationRefs` 和明确来源归属。模型字段不合规时必须仅对该字段做服务端 fallback，其余模型研判保留；字段级降级名单写入 `generationMeta.prominentFallbackFields` / `synthesisFallbackFields` 和数据提示。`stance` 仍只描述已完成交易日，前瞻证据质量必须标明不是涨跌概率；历史 v1 复盘缺少新字段时前端直接兼容，不得触发重算。
