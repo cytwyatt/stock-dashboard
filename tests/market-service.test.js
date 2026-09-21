@@ -90,6 +90,10 @@ test('缓存 TTL 与 key 保持当前服务端契约', () => {
   assert.equal(cacheKeys.rank('us', 'down', 'open'), 'rank:us:down:open');
   assert.equal(cacheKeys.overview('cn'), 'overview:cn');
   assert.equal(cacheKeys.overview('hk'), 'overview:hk');
+  assert.equal(
+    cacheKeys.overview('us', '2026-07-14T20:00:00.000Z'),
+    'overview:us:cutoff:2026-07-14T20:00:00.000Z',
+  );
   assert.equal(cacheKeys.quote('AAPL'), 'q:AAPL');
   assert.equal(cacheKeys.quotes(['sh600519', 'AAPL']), 'qs:sh600519,AAPL');
   assert.equal(cacheKeys.search('茅台'), 's:茅台');
@@ -123,6 +127,11 @@ test('各方法使用对应 cache key、TTL 与 provider，并统一返回 entry
     {
       invoke: (service) => service.overview('us'),
       key: 'overview:us', ttl: 60000, provider: 'getOverviewUS', args: [],
+    },
+    {
+      invoke: (service) => service.overview('us', { cutoffAt: '2026-07-14T20:00:00Z' }),
+      key: 'overview:us:cutoff:2026-07-14T20:00:00.000Z', ttl: 60000,
+      provider: 'getOverviewUS', args: [{ cutoffAt: '2026-07-14T20:00:00.000Z' }],
     },
     {
       invoke: (service) => service.overview('hk'),

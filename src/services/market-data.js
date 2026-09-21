@@ -208,7 +208,7 @@ function createMarketData({
     searchStocks: (query) => tencent.searchStocks(query),
     getOverviewCN,
     getOverviewHK,
-    getOverviewUS: () => yahoo.getOverview(),
+    getOverviewUS: (options) => yahoo.getOverview(options),
     getNews: (count) => sina.getNews(count),
     getStockNews,
     countLimit: (dir) => sina.countLimit(dir),

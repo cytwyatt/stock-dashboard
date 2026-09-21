@@ -1,6 +1,8 @@
 'use strict';
 
 function finite(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value !== 'string' || !value.trim()) return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
@@ -18,19 +20,56 @@ function periodReturn(rows, intervals) {
     : null;
 }
 
+function isCalendarDate(value) {
+  const text = String(value || '');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const [year, month, day] = text.split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCFullYear() === year
+    && date.getUTCMonth() === month - 1
+    && date.getUTCDate() === day;
+}
+
+function normalizeHistoryRows(rows) {
+  const byDate = new Map();
+  const duplicateDates = new Set();
+  const conflictingDuplicateDates = new Set();
+  for (const raw of Array.isArray(rows) ? rows : []) {
+    if (!raw || !isCalendarDate(raw.date)) continue;
+    const row = {
+      date: String(raw.date),
+      open: finite(raw.open),
+      close: finite(raw.close),
+      high: finite(raw.high),
+      low: finite(raw.low),
+      volume: finite(raw.volume),
+    };
+    if (row.close == null || row.close <= 0) continue;
+    const previous = byDate.get(row.date);
+    if (previous) {
+      duplicateDates.add(row.date);
+      if (['open', 'close', 'high', 'low', 'volume']
+        .some((key) => previous[key] !== row[key])) {
+        conflictingDuplicateDates.add(row.date);
+      }
+    }
+    // The last provider row wins. This is deterministic and matches the usual
+    // provider convention that a later row is the most recently revised bar.
+    byDate.set(row.date, row);
+  }
+  return {
+    rows: [...byDate.values()].sort((left, right) => left.date.localeCompare(right.date)),
+    quality: {
+      duplicateDates: [...duplicateDates].sort(),
+      conflictingDuplicateDates: [...conflictingDuplicateDates].sort(),
+      duplicateResolution: 'last_row_wins',
+    },
+  };
+}
+
 function summarizeIndexHistory(rows) {
-  const clean = (Array.isArray(rows) ? rows : [])
-    .filter((row) => row && /^\d{4}-\d{2}-\d{2}$/.test(String(row.date || '')))
-    .map((row) => ({
-      date: String(row.date),
-      open: finite(row.open),
-      close: finite(row.close),
-      high: finite(row.high),
-      low: finite(row.low),
-      volume: finite(row.volume),
-    }))
-    .filter((row) => row.close != null && row.close > 0)
-    .sort((left, right) => left.date.localeCompare(right.date));
+  const normalized = normalizeHistoryRows(rows);
+  const clean = normalized.rows;
   if (!clean.length) return null;
 
   const latest = clean.at(-1);
@@ -42,8 +81,9 @@ function summarizeIndexHistory(rows) {
   const window20 = clean.slice(-20);
   const highs = window20.map((row) => row.high).filter((value) => value != null);
   const lows = window20.map((row) => row.low).filter((value) => value != null);
-  const high20 = highs.length ? Math.max(...highs) : null;
-  const low20 = lows.length ? Math.min(...lows) : null;
+  const completeWindow20 = window20.length === 20;
+  const high20 = completeWindow20 && highs.length === 20 ? Math.max(...highs) : null;
+  const low20 = completeWindow20 && lows.length === 20 ? Math.min(...lows) : null;
   const previousVolumes = clean.slice(-21, -1)
     .map((row) => row.volume)
     .filter((value) => value != null && value >= 0);
@@ -76,6 +116,9 @@ function summarizeIndexHistory(rows) {
       positionPct: high20 != null && low20 != null && high20 > low20
         ? round((latest.close - low20) / (high20 - low20) * 100)
         : null,
+      highSampleCount: highs.length,
+      lowSampleCount: lows.length,
+      requiredSamples: 20,
     },
     volume: {
       latest: latest.volume,
@@ -86,10 +129,13 @@ function summarizeIndexHistory(rows) {
       sampleCount: previousVolumes.length,
     },
     observations: clean.length,
+    quality: normalized.quality,
   };
 }
 
 module.exports = {
+  finite,
+  normalizeHistoryRows,
   round,
   summarizeIndexHistory,
 };

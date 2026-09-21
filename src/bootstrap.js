@@ -34,6 +34,7 @@ const {
   isMarketOpen,
 } = require('./core/time');
 const researchDomain = require('./domain/research-card');
+const { createTradingCalendar } = require('./core/trading-calendar');
 
 const { createHttpClient } = require('./providers/http-client');
 const {
@@ -54,6 +55,7 @@ const { createMarketData, summarizeSectorBreadth } = require('./services/market-
 const { createMarketService } = require('./services/market-service');
 const { createResearchService } = require('./services/research-service');
 const { createStockEventsService } = require('./services/stock-events-service');
+const { createMarketSignalService } = require('./services/market-signal-service');
 const {
   CACHE_WARM_INTERVAL_MS,
   createCacheWarmer,
@@ -64,6 +66,7 @@ const { createWatchlistStore } = require('./storage/watchlist-store');
 const { createLLMConfigStore } = require('./storage/llm-config-store');
 const { createChatStore } = require('./storage/chat-store');
 const { createMarketReviewStore } = require('./storage/market-review-store');
+const { createMarketSignalStore } = require('./storage/market-signal-store');
 
 const { createLLMClient } = require('./ai/llm-client');
 const { createCodexClient } = require('./ai/codex-client');
@@ -209,12 +212,23 @@ function createApplication({
     fs,
     jsonFile,
   });
+  const marketSignalStore = createMarketSignalStore({ dataDir, fs, jsonFile });
+  const tradingCalendar = createTradingCalendar();
+  const marketSignalService = createMarketSignalService({
+    marketService,
+    marketSignalStore,
+    tradingCalendar,
+    marketMeta,
+    crypto,
+  });
 
   const codexClient = createCodexClient({ env });
   const llmClient = createLLMClient({ fetchImpl, codexClient });
   const marketReviewService = createMarketReviewService({
     marketService,
     marketReviewStore,
+    marketSignalService,
+    tradingCalendar,
     llmConfigStore,
     llmClient,
     marketMeta,
@@ -335,7 +349,9 @@ function createApplication({
     marketSummaryService: marketReviewService,
     stockEventsService,
     chatService,
-    stores: { watchlistStore, llmConfigStore, chatStore, marketReviewStore },
+    marketSignalService,
+    tradingCalendar,
+    stores: { watchlistStore, llmConfigStore, chatStore, marketReviewStore, marketSignalStore },
     compatibility: {
       ...researchDomain,
       hasStockResearchIntent,

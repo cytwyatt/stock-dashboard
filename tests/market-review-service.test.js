@@ -115,6 +115,53 @@ function entry(data, meta = {}) {
   return { data, fetchedAt: Date.parse('2026-07-14T07:01:00Z'), stale: false, staleSince: null };
 }
 
+function directionalSnapshot() {
+  return {
+    status: 'partial',
+    reviewDate: '2026-07-14',
+    cutoffAt: '2026-07-14T07:00:00.000Z',
+    capturedAt: '2026-07-14T07:10:00.000Z',
+    generatedAt: null,
+    nextSessionDate: '2026-07-15',
+    calendarStatus: 'known',
+    calendarVersion: 'synthetic-calendar',
+    rulesVersion: 'synthetic-rules-v1',
+    methodology: 'heuristic_unvalidated',
+    isPredictionProbability: false,
+    inputSnapshotId: 'cn:2026-07-14:synthetic',
+    inputHash: 'a'.repeat(64),
+    metrics: [{
+      id: 'trend:sh000001:ma20', label: '20日均线', value: 3200,
+      unit: 'index_points', source: 'synthetic', asOf: '2026-07-14', sampleCount: 20,
+    }],
+    computedSignals: [{
+      id: 'trend:sh000001', label: '上证指数趋势结构', category: 'trend',
+      factorGroup: 'index_trend', scope: 'index:sh000001', side: 'bullish',
+      state: 'observed', ruleId: 'synthetic', metricRefs: ['trend:sh000001:ma20'],
+      evidenceRefs: ['indexHistory'], source: 'synthetic', asOf: '2026-07-14',
+      sampleCount: 60, coverage: 'synthetic', rationale: 'synthetic',
+    }],
+    eventSignals: [],
+    watchTriggers: [{
+      id: 'watch:sh000001:ma20', label: '均线关系', scope: 'index:sh000001',
+      state: 'conditional', side: 'bearish', metricRef: 'trend:sh000001:ma20',
+      operator: 'crosses_below', comparisonRef: 'trend:sh000001:ma20',
+      window: 'next_session', unit: 'index_points', source: 'synthetic',
+    }],
+    interpretation: {
+      alignment: '规则信号仅作证据整理，不按数量投票。',
+      keyCounterEvidence: '覆盖范围有限是当前最重要的反证。',
+      nextSessionFocus: '优先验证指数结构能否获得宽度确认。',
+      signalRefs: ['trend:sh000001'],
+      evidenceRefs: ['directionalSignalFacts'],
+    },
+    availableGroups: ['index_trend'],
+    missingGroups: ['liquidity'],
+    qualityWarnings: [],
+    coverage: 'synthetic fixture',
+  };
+}
+
 function createHarness({
   timestamp = Date.parse('2026-07-14T07:20:00Z'),
   store = createMemoryStore(),
@@ -129,6 +176,8 @@ function createHarness({
   sectorsData = [],
   rankDataByDirection = {},
   quotesData = [],
+  directionalSnapshot = null,
+  tradingCalendar = null,
 } = {}) {
   const calls = { indices: 0, kline: 0, llm: 0 };
   const llmRequests = [];
@@ -166,7 +215,8 @@ function createHarness({
       result.staleSince = result.stale ? Date.parse('2026-07-14T07:10:00Z') : null;
       return result;
     },
-    async overview() {
+    async overview(market, options) {
+      calls.overview = { market, options: options || null };
       return entry({
         up: 3200, nonUp: 2100, total: 5300, turnover: 2.1e12,
         comparison: {
@@ -192,6 +242,10 @@ function createHarness({
   const service = createMarketReviewService({
     marketService,
     marketReviewStore: store,
+    marketSignalService: directionalSnapshot ? {
+      async buildSnapshot() { return structuredClone(directionalSnapshot); },
+    } : null,
+    tradingCalendar,
     llmConfigStore: {
       getLLMConfig: () => ({
         apiKey,
@@ -219,8 +273,8 @@ function createHarness({
   return { service, store, calls, llmRequests };
 }
 
-test('盘后复盘 v2 提示词固定综合研判与条件式展望契约', () => {
-  assert.equal(REVIEW_SCHEMA_VERSION, 2);
+test('盘后复盘 v3 提示词固定综合研判、规则信号与条件式展望契约', () => {
+  assert.equal(REVIEW_SCHEMA_VERSION, 3);
   const prompt = marketReviewSystemPrompt();
   for (const field of [
     'synthesisOutlook', 'integratedAssessment', 'summary', 'baseCase',
@@ -235,6 +289,8 @@ test('盘后复盘 v2 提示词固定综合研判与条件式展望契约', () =
   assert.match(prompt, /(?:不得|禁止).*(?:必然|一定|保证|确定性)/);
   assert.match(prompt, /(?:不得|禁止).*(?:买卖|仓位|收益承诺|投资建议)/);
   assert.match(prompt, /基准判断/);
+  assert.match(prompt, /directionalSignals/);
+  assert.match(prompt, /不得输出综合多空分数/);
 });
 
 test('Codex 复盘不要求 API Key，仍只生成一次并保留 JSON 校验和元数据', async () => {
@@ -374,7 +430,7 @@ test('生成结果把模型综合研判映射为固定周期卡片与三种详�
   const review = await service.ensureReview('cn');
 
   assert.equal(calls.llm, 1);
-  assert.equal(review.data.schemaVersion, 2);
+  assert.equal(review.data.schemaVersion, 3);
   assert.match(llmRequests[0].messages[1].content, /未来一至五个交易日/);
   assert.deepEqual(review.data.card.outlook, {
     horizon: '未来一至五个交易日',
@@ -459,6 +515,62 @@ test('基准情景字段降级时仍根据价格趋势给出方向，不默认�
   assert.notEqual(base.bias, '数据不足');
   assert.equal(
     review.data.detail.synthesisOutlook.integratedAssessment,
+    payload.synthesisOutlook.integratedAssessment,
+  );
+});
+
+test('v3 多空信号只接受服务端 ID，事件新闻有来源且字段级降级不损坏原复盘', async () => {
+  const snapshot = directionalSnapshot();
+  const payload = JSON.parse(serviceCompletion());
+  payload.directionalSignals = {
+    interpretation: {
+      alignment: '指数趋势与现有宽度线索方向一致，但可用因子组仍然有限。',
+      keyCounterEvidence: '量能证据缺失使趋势延续判断缺少独立确认。',
+      nextSessionFocus: '下个交易日优先验证指数结构能否获得宽度与量能共同确认。',
+      signalRefs: ['trend:sh000001'],
+      metricRefs: ['trend:sh000001:ma20'],
+      evidenceRefs: ['directionalSignalFacts'],
+    },
+    eventSignals: [{
+      label: '政策线索', side: 'bullish', scope: 'market', state: 'conditional',
+      newsRefs: ['news:1'],
+      reportedFact: '据新浪财经报道，市场出现一项仍需核验的政策线索。',
+      transmissionHypothesis: '若后续价格与宽度同步改善，该线索才可能形成正向传导。',
+      confirmingSignalIds: ['trend:sh000001'],
+      contradictingSignalIds: [],
+      pendingConditions: ['价格与宽度出现同步改善'],
+      invalidations: ['指数结构转弱且宽度未能确认'],
+    }],
+  };
+  const { service, calls } = createHarness({
+    completionText: JSON.stringify(payload), directionalSnapshot: snapshot,
+  });
+  const review = await service.ensureReview('cn');
+  assert.equal(calls.llm, 1);
+  assert.equal(review.data.schemaVersion, 3);
+  assert.equal(review.data.inputSnapshotId, snapshot.inputSnapshotId);
+  assert.equal(review.data.card.signalSummary.bullishObserved, 1);
+  assert.equal(review.data.detail.directionalSignals.eventSignals.length, 1);
+  assert.equal(review.data.citations.some((item) => item.id === 'news:1'), true);
+
+  const malicious = structuredClone(payload);
+  malicious.directionalSignals.interpretation.alignment = '<script>伪造内容</script>';
+  malicious.directionalSignals.interpretation.signalRefs = ['forged:signal'];
+  malicious.directionalSignals.eventSignals[0].newsRefs = ['news:forged'];
+  const degradedHarness = createHarness({
+    completionText: JSON.stringify(malicious),
+    directionalSnapshot: snapshot,
+  });
+  const degraded = await degradedHarness.service.ensureReview('cn');
+  assert.equal(degraded.data.detail.directionalSignals.eventSignals.length, 0);
+  assert.equal(
+    degraded.data.detail.directionalSignals.interpretation.alignment,
+    snapshot.interpretation.alignment,
+  );
+  assert.ok(degraded.data.generationMeta.directionalFallbackFields.includes('interpretation.alignment'));
+  assert.ok(degraded.data.generationMeta.directionalFallbackFields.includes('interpretation.signalRefs'));
+  assert.equal(
+    degraded.data.detail.synthesisOutlook.integratedAssessment,
     payload.synthesisOutlook.integratedAssessment,
   );
 });
@@ -863,8 +975,10 @@ test('官方 DeepSeek V4 复盘独立使用 Pro、高强度思考与 JSON 模式
     droppedItemCount: 0,
     prominentFallbackUsed: false,
     synthesisFallbackUsed: false,
+    directionalFallbackUsed: false,
     prominentFallbackFields: [],
     synthesisFallbackFields: [],
+    directionalFallbackFields: [],
   });
 });
 
@@ -942,6 +1056,23 @@ test('收盘缓冲前只返回 scheduled，不采集行情或调用模型', asyn
   assert.equal(result.data.status, 'scheduled');
   assert.equal(result.data.available, false);
   assert.deepEqual(calls, { indices: 0, kline: 0, llm: 0 });
+});
+
+test('次日开盘前会补生成遗漏的上一交易日复盘', async () => {
+  const store = createMemoryStore();
+  store.upsert({ market: 'cn', reviewDate: '2026-07-13', schemaVersion: 2 });
+  const { service, calls } = createHarness({
+    timestamp: Date.parse('2026-07-15T06:59:00Z'),
+    store,
+    tradingCalendar: {
+      session() { return { calendarStatus: 'unknown' }; },
+      previousSession() { return null; },
+    },
+  });
+  const result = await service.ensureReview('cn');
+  assert.equal(result.data.status, 'ready');
+  assert.equal(result.data.reviewDate, '2026-07-14');
+  assert.equal(calls.llm, 1);
 });
 
 test('同一市场交易日并发请求、后续请求与服务重建都只生成一次', async () => {
@@ -1040,8 +1171,8 @@ test('次要指数的旧缓存与跨交易日日线会被排除并进入限制�
   assert.ok(evidence.limitations.some((item) => item.includes('创业板指') && item.includes('不一致')));
 });
 
-test('美股证据会同时采集涨跌代表样本', async () => {
-  const { service } = createHarness({
+test('美股证据会按股票收盘截止采集宏观代理并同时采集涨跌代表样本', async () => {
+  const { service, calls } = createHarness({
     indicesRows: [{
       code: '^GSPC', name: '标普五百', price: 6200, changePct: 0.4,
       asOf: '2026-07-14T16:00:00-04:00',
@@ -1054,6 +1185,9 @@ test('美股证据会同时采集涨跌代表样本', async () => {
   });
   const evidence = await service.collectEvidence('us', new Date('2026-07-14T20:20:00Z'));
   const names = new Set(evidence.components.map((component) => component.name));
+  assert.deepEqual(calls.overview, {
+    market: 'us', options: { cutoffAt: '2026-07-14T20:00:00.000Z' },
+  });
   assert.equal(names.has('representativeGainers'), true);
   assert.equal(names.has('representativeLosers'), true);
   assert.ok(evidence.limitations.some((item) => item.includes('美股涨跌榜')));

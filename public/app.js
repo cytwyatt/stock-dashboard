@@ -1807,6 +1807,198 @@ function renderOutlookTextList(items, emptyText) {
     : `<p class="market-summary-empty">${escapeHtml(emptyText)}</p>`;
 }
 
+const SIGNAL_SIDE_LABELS = Object.freeze({
+  bullish: '偏多', bearish: '偏空', mixed: '分化', neutral: '中性',
+});
+const SIGNAL_OPERATOR_LABELS = Object.freeze({
+  crosses_above: '上穿比较基准', crosses_below: '下穿比较基准',
+  greater_than: '高于比较基准', less_than: '低于比较基准',
+});
+const SIGNAL_FEATURE_LABELS = Object.freeze({
+  aboveMa20: ['收盘高于 MA20', '收盘不高于 MA20'],
+  aboveMa50: ['收盘高于 MA50', '收盘不高于 MA50'],
+  reclaimedMa20: ['当日收复 MA20', '未出现当日收复 MA20'],
+  lostMa20: ['当日跌破 MA20', '未出现当日跌破 MA20'],
+  breakoutPrior20: ['突破此前二十日高点', '未突破此前二十日高点'],
+  breakdownPrior20: ['跌破此前二十日低点', '未跌破此前二十日低点'],
+});
+
+function signalSideClass(value) {
+  if (value === 'bullish') return 'positive';
+  if (value === 'bearish') return 'negative';
+  return 'neutral';
+}
+
+function formatSignalMetric(metric) {
+  const value = Number(metric && metric.value);
+  if (!Number.isFinite(value)) return '不可用';
+  const unit = summaryText(metric.unit);
+  if (unit === 'percent') return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+  if (unit === 'basis_points') return `${value >= 0 ? '+' : ''}${value.toFixed(1)}bp`;
+  if (unit === 'ratio') return `${value.toFixed(2)}×`;
+  if (unit === 'count') return `${value.toFixed(0)}`;
+  return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+}
+
+function renderSignalMetrics(refs, metricMap) {
+  const metrics = (Array.isArray(refs) ? refs : [])
+    .map((ref) => metricMap.get(summaryText(ref)))
+    .filter(Boolean);
+  if (!metrics.length) return '';
+  return `<div class="market-signal-metrics">${metrics.map((metric) => {
+    const meta = [summaryText(metric.window), summaryText(metric.asOf), summaryText(metric.source)]
+      .filter(Boolean).join(' · ');
+    const sample = Number.isInteger(metric.sampleCount) ? `样本 ${metric.sampleCount}` : '';
+    return `<div class="market-signal-metric">
+      <span>${escapeHtml(summaryText(metric.label) || summaryText(metric.id))}</span>
+      <strong>${escapeHtml(formatSignalMetric(metric))}</strong>
+      ${meta || sample ? `<small>${escapeHtml([meta, sample].filter(Boolean).join(' · '))}</small>` : ''}
+    </div>`;
+  }).join('')}</div>`;
+}
+
+function renderComputedSignal(signal, metricMap) {
+  const side = summaryText(signal.side);
+  const label = summaryText(signal.label) || summaryText(signal.id) || '未命名信号';
+  const state = summaryText(signal.state);
+  const meta = [summaryText(signal.scope), summaryText(signal.asOf), summaryText(signal.coverage)]
+    .filter(Boolean).join(' · ');
+  const features = signal.features && typeof signal.features === 'object'
+    ? Object.entries(signal.features).filter(([key, enabled]) => (
+        Object.prototype.hasOwnProperty.call(SIGNAL_FEATURE_LABELS, key)
+          && typeof enabled === 'boolean'
+      )).map(([key, enabled]) => SIGNAL_FEATURE_LABELS[key][enabled ? 0 : 1])
+    : [];
+  return `<details class="market-signal-item ${signalSideClass(side)}">
+    <summary>
+      <span>${escapeHtml(label)}</span>
+      <span class="market-signal-side ${signalSideClass(side)}">${escapeHtml(
+        state === 'unavailable' ? '不可用' : SIGNAL_SIDE_LABELS[side] || '未分类',
+      )}</span>
+    </summary>
+    ${summaryText(signal.rationale) ? `<p>${escapeHtml(summaryText(signal.rationale))}</p>` : ''}
+    ${features.length ? `<div class="market-signal-features">${features.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
+    ${renderSignalMetrics(signal.metricRefs, metricMap)}
+    ${meta ? `<small class="market-signal-meta">${escapeHtml(meta)}</small>` : ''}
+  </details>`;
+}
+
+function renderSignalTrigger(trigger, metricMap) {
+  const comparison = metricMap.get(summaryText(trigger.comparisonRef));
+  const comparisonText = comparison
+    ? `${summaryText(comparison.label) || summaryText(comparison.id)} ${formatSignalMetric(comparison)}`
+    : summaryText(trigger.comparisonRef);
+  return `<li><strong>${escapeHtml(summaryText(trigger.label) || '触发条件')}</strong><span>${escapeHtml([
+    SIGNAL_OPERATOR_LABELS[summaryText(trigger.operator)] || summaryText(trigger.operator),
+    comparisonText,
+    summaryText(trigger.window) === 'next_session' ? '下个交易日' : summaryText(trigger.window),
+    summaryText(trigger.scope),
+  ].filter(Boolean).join(' · '))}</span></li>`;
+}
+
+function renderMarketSignalSummary(value, directionalSignals) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const signalMap = new Map((Array.isArray(directionalSignals?.computedSignals)
+    ? directionalSignals.computedSignals : []).map((signal) => [summaryText(signal.id), signal]));
+  const signalLabels = (ids) => (Array.isArray(ids) ? ids : [])
+    .map((id) => signalMap.get(summaryText(id)))
+    .filter(Boolean)
+    .map((signal) => summaryText(signal.label))
+    .slice(0, 2);
+  const bullish = signalLabels(value.topBullishSignalIds);
+  const bearish = signalLabels(value.topBearishSignalIds);
+  return `<div class="market-signal-summary">
+    <div class="market-signal-summary-head">
+      <strong>规则多空信号</strong>
+      <span>${escapeHtml(String(Number(value.availableFactorGroups) || 0))} 个因子组可用 · 非涨跌概率</span>
+    </div>
+    <div class="market-signal-summary-grid">
+      <div class="positive"><span>偏多</span><strong>${escapeHtml(String(Number(value.bullishObserved) || 0))}</strong><small>${escapeHtml(bullish.join('、') || '未检出')}</small></div>
+      <div class="negative"><span>偏空</span><strong>${escapeHtml(String(Number(value.bearishObserved) || 0))}</strong><small>${escapeHtml(bearish.join('、') || '未检出')}</small></div>
+    </div>
+  </div>`;
+}
+
+function renderReviewDirectionalSignals(value, citationMap, timezone) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const metrics = Array.isArray(value.metrics) ? value.metrics : [];
+  const metricMap = new Map(metrics.map((metric) => [summaryText(metric.id), metric]));
+  const signals = Array.isArray(value.computedSignals) ? value.computedSignals : [];
+  const signalMap = new Map(signals.map((signal) => [summaryText(signal.id), signal]));
+  const observed = signals.filter((signal) => signal && signal.state === 'observed');
+  const bullish = observed.filter((signal) => signal.side === 'bullish');
+  const bearish = observed.filter((signal) => signal.side === 'bearish');
+  const unavailable = signals.filter((signal) => signal && signal.state === 'unavailable');
+  const triggers = Array.isArray(value.watchTriggers) ? value.watchTriggers : [];
+  const events = Array.isArray(value.eventSignals) ? value.eventSignals : [];
+  const interpretation = value.interpretation && typeof value.interpretation === 'object'
+    ? value.interpretation : {};
+  const cutoffAt = shortAsOf(value.cutoffAt, timezone);
+  const capturedAt = shortAsOf(value.capturedAt, timezone);
+  const generatedAt = shortAsOf(value.generatedAt, timezone);
+  const metadata = [
+    cutoffAt ? `截止 ${cutoffAt}` : '',
+    capturedAt ? `抓取 ${capturedAt}` : '',
+    generatedAt ? `生成 ${generatedAt}` : '',
+    summaryText(value.nextSessionDate) ? `下个交易日 ${summaryText(value.nextSessionDate)}`
+      : summaryText(value.calendarStatus) === 'unknown' ? '下个交易日未知' : '',
+    summaryText(value.rulesVersion) ? `规则 ${summaryText(value.rulesVersion)}` : '',
+  ].filter(Boolean);
+  const emptySide = (text) => `<p class="market-summary-empty">${escapeHtml(text)}</p>`;
+  return `<section class="market-review-signals" aria-labelledby="marketReviewSignalsTitle">
+    <div class="market-review-signals-head">
+      <h3 id="marketReviewSignalsTitle">多空信号与触发条件</h3>
+      <span>${escapeHtml(summaryText(value.status) || 'unavailable')}</span>
+    </div>
+    <p class="market-signal-disclaimer">初始工程规则未经样本外验证，不是综合评分、涨跌概率或交易建议。</p>
+    ${metadata.length ? `<div class="market-signal-time">${metadata.map((item) => `<span>${escapeHtml(item)}</span>`).join('')}</div>` : ''}
+    <div class="market-signal-columns">
+      <div><h4>已观察到的偏多证据</h4>${bullish.length
+        ? bullish.map((signal) => renderComputedSignal(signal, metricMap)).join('')
+        : emptySide('未检出符合当前规则的偏多证据；不等于不存在上行可能。')}</div>
+      <div><h4>已观察到的偏空证据</h4>${bearish.length
+        ? bearish.map((signal) => renderComputedSignal(signal, metricMap)).join('')
+        : emptySide('未检出符合当前规则的偏空证据；不等于不存在下行风险。')}</div>
+    </div>
+    <div class="market-signal-interpretation">
+      <h4>信号确认、反证与下个交易日验证</h4>
+      ${summaryText(interpretation.alignment) ? `<p><strong>相互确认：</strong>${escapeHtml(summaryText(interpretation.alignment))}</p>` : ''}
+      ${summaryText(interpretation.keyCounterEvidence) ? `<p><strong>首要反证：</strong>${escapeHtml(summaryText(interpretation.keyCounterEvidence))}</p>` : ''}
+      ${summaryText(interpretation.nextSessionFocus) ? `<p><strong>优先验证：</strong>${escapeHtml(summaryText(interpretation.nextSessionFocus))}</p>` : ''}
+    </div>
+    <div class="market-signal-watch">
+      <h4>条件尚未兑现 / 下个交易日观察</h4>
+      ${triggers.length ? `<ul>${triggers.map((trigger) => renderSignalTrigger(trigger, metricMap)).join('')}</ul>` : emptySide('暂无可自动核验的结构化触发条件。')}
+    </div>
+    ${events.length ? `<div class="market-signal-events"><h4>有来源的事件信号</h4>${events.map((event) => {
+      const confirming = (Array.isArray(event.confirmingSignalIds) ? event.confirmingSignalIds : [])
+        .map((id) => signalMap.get(summaryText(id)))
+        .filter(Boolean).map((signal) => summaryText(signal.label));
+      const contradicting = (Array.isArray(event.contradictingSignalIds) ? event.contradictingSignalIds : [])
+        .map((id) => signalMap.get(summaryText(id)))
+        .filter(Boolean).map((signal) => summaryText(signal.label));
+      return `<article>
+      <div><strong>${escapeHtml(summaryText(event.label) || '事件线索')}</strong><span class="market-signal-side ${signalSideClass(summaryText(event.side))}">${escapeHtml(SIGNAL_SIDE_LABELS[summaryText(event.side)] || '方向待定')}</span></div>
+      <p><strong>报道事实：</strong>${escapeHtml(summaryText(event.reportedFact))}</p>
+      <p><strong>传导假说：</strong>${escapeHtml(summaryText(event.transmissionHypothesis))}</p>
+      ${confirming.length ? `<p><strong>行情确认：</strong>${escapeHtml(confirming.join('、'))}</p>` : ''}
+      ${contradicting.length ? `<p><strong>行情反证：</strong>${escapeHtml(contradicting.join('、'))}</p>` : ''}
+      <div class="market-review-scenario-signals">
+        <div><strong>待兑现条件</strong>${renderOutlookTextList(event.pendingConditions, '暂无待兑现条件。')}</div>
+        <div><strong>失效条件</strong>${renderOutlookTextList(event.invalidations, '暂无失效条件。')}</div>
+      </div>
+      ${renderReviewCitationRefs(event.newsRefs, citationMap)}
+    </article>`;
+    }).join('')}</div>` : ''}
+    <div class="market-signal-coverage">
+      <h4>覆盖不足或不可用</h4>
+      ${unavailable.length ? unavailable.map((signal) => renderComputedSignal(signal, metricMap)).join('') : emptySide('当前记录的规则因子均有可用结果。')}
+      ${summaryText(value.coverage) ? `<p>${escapeHtml(summaryText(value.coverage))}</p>` : ''}
+      ${renderSummaryWarnings(value.qualityWarnings)}
+    </div>
+  </section>`;
+}
+
 function renderReviewSynthesisOutlook(value, citationMap) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
   const integratedAssessment = summaryText(value.integratedAssessment);
@@ -1995,6 +2187,7 @@ function renderMarketReviewDetail(data) {
     || '本次复盘暂无执行摘要。';
   const executiveEvidence = detail.evidenceRefs && detail.evidenceRefs.executiveSummary;
   const synthesisOutlook = detail.synthesisOutlook;
+  const directionalSignals = detail.directionalSignals;
   const citations = Array.isArray(data.citations) ? data.citations : [];
   const citationMap = citationsById(citations);
   const sections = (Array.isArray(detail.sections) ? detail.sections : [])
@@ -2018,6 +2211,7 @@ function renderMarketReviewDetail(data) {
     </section>
     ${renderSummaryWarnings(data.dataWarnings, citationMap)}
     ${renderReviewSynthesisOutlook(synthesisOutlook, citationMap)}
+    ${renderReviewDirectionalSignals(directionalSignals, citationMap, timezone)}
     <div class="market-review-sections">${sections.length
       ? sections.map((section) => `<section class="market-review-section">
           <h3>${escapeHtml(summaryText(section.title) || summaryText(section.key) || '复盘要点')}</h3>
@@ -2114,6 +2308,7 @@ function renderMarketSummary(data) {
         </div>
       </div>
       ${renderReviewMetrics(card.metrics)}
+      ${renderMarketSignalSummary(card.signalSummary, data.detail && data.detail.directionalSignals)}
       ${themes.length ? `<div class="market-review-themes" aria-label="复盘主题">${themes
         .map((theme) => `<span>${escapeHtml(theme)}</span>`).join('')}</div>` : ''}
       ${outlookSummary ? `<div class="market-review-outlook-preview">

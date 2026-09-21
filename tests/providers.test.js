@@ -280,6 +280,21 @@ test('Yahoo spark 批量报价可携带扩展时段，数组元数据仍对齐�
   assert.equal(getMeta(quotes).asOf, quotes[0].asOf);
 });
 
+test('Yahoo spark 可按复盘截止时刻选择最后一个有效五分钟点', () => {
+  const result = yahooExtendedFixture();
+  const quotes = parseSparkQuotes({
+    spark: { result: [{ symbol: '^VIX', response: [result] }] },
+  }, [{ code: '^VIX', name: '恐慌指数 VIX' }], {
+    annotateMarketData,
+    cutoffAt: '2026-07-13T20:00:00.000Z',
+  });
+
+  assert.equal(quotes[0].price, 105);
+  assert.equal(quotes[0].changePct, 5);
+  assert.equal(quotes[0].asOf, '2026-07-13T19:55:00.000Z');
+  assert.equal(quotes[0].snapshotBasis, 'intraday_at_or_before_cutoff');
+});
+
 test('Yahoo 扩展时段按上游边界分类，分时保留盘前、常规与盘后标记', () => {
   const result = yahooExtendedFixture();
   const periods = result.meta.tradingPeriods;

@@ -29,7 +29,7 @@ const cacheKeys = Object.freeze({
   kline: (code, days, period) => `k:${code}:${days}:${period}`,
   sectors: () => 'sectors',
   rank: (market, dir, regime) => `rank:${market}:${dir}${regime ? `:${regime}` : ''}`,
-  overview: (market) => `overview:${market}`,
+  overview: (market, cutoffAt = '') => `overview:${market}${cutoffAt ? `:cutoff:${cutoffAt}` : ''}`,
   quote: (code) => `q:${code}`,
   quotes: (codes) => `qs:${codes.join(',')}`,
   search: (query) => `s:${query}`,
@@ -177,15 +177,17 @@ function createMarketService(deps) {
       );
     },
 
-    async overview(market) {
+    async overview(market, options = {}) {
       const normalizedMarket = normalizeOverviewMarket(market);
+      const requestedCutoff = normalizedMarket === 'us' && Number.isFinite(Date.parse(options.cutoffAt))
+        ? new Date(Date.parse(options.cutoffAt)).toISOString() : '';
       const provider = normalizedMarket === 'us'
-        ? getOverviewUS
+        ? requestedCutoff ? () => getOverviewUS({ cutoffAt: requestedCutoff }) : getOverviewUS
         : normalizedMarket === 'hk'
           ? getOverviewHK
           : async () => getOverviewCN(await service.sectors());
       return cachedEntry(
-        cacheKeys.overview(normalizedMarket),
+        cacheKeys.overview(normalizedMarket, requestedCutoff),
         CACHE_TTL.overview,
         provider
       );

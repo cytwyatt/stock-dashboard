@@ -10,7 +10,7 @@ const {
   deterministicStance,
 } = require('./market-summary-service');
 
-const REVIEW_SCHEMA_VERSION = 2;
+const REVIEW_SCHEMA_VERSION = 3;
 const REVIEW_RETRY_MS = 30 * 60 * 1000;
 const REVIEW_NOOP_CHECK_MS = 30 * 60 * 1000;
 const REVIEW_MAX_OUTPUT_TOKENS = 32768;
@@ -46,6 +46,8 @@ const SECTION_DEFS = Object.freeze([
 const SECTION_KEYS = new Set(SECTION_DEFS.map(([key]) => key));
 const VALID_STANCES = new Set(['偏强', '中性', '偏弱', '分化', '数据不足']);
 const VALID_CLAIM_TYPES = new Set(['observation', 'association', 'analysis', 'reported_cause']);
+const VALID_SIGNAL_SIDES = new Set(['bullish', 'bearish', 'mixed', 'neutral']);
+const VALID_SIGNAL_STATES = new Set(['observed', 'conditional']);
 const OUTLOOK_HORIZON = '未来一至五个交易日';
 const VALID_OUTLOOK_BIASES = new Set(['震荡偏强', '震荡', '震荡偏弱', '分化', '数据不足']);
 const OUTLOOK_SCENARIO_DEFS = Object.freeze([
@@ -64,6 +66,8 @@ const EXTERNAL_EVENT_LANGUAGE = /(?:政策|新闻|消息|事件|公告|财报|�
 const REPORTED_ATTRIBUTION_LANGUAGE = /(?:据[^，。；;]{1,48}(?:报道|提及|指出|披露|显示|称)|(?:报道称|报道提及|公告显示|数据显示|消息称|媒体提及|新闻提及))/;
 const OUTLOOK_FORBIDDEN_LANGUAGE = /(?:必然|必定|一定会|肯定会|毫无疑问|无悬念|不会(?:再)?改变|不可改变|板上钉钉|铁定|注定|必涨|必跌|稳赚|保证收益|收益承诺|目标价|买入|卖出|加仓|减仓|增持|减持|满仓|空仓|仓位|持仓|止损|止盈|做多|做空|抄底|追涨|建议投资者|上涨概率|下跌概率|胜率|\d{1,3}\s*%\s*(?:概率|可能性)|[一二三四五六七八九十]成(?:概率|可能性)?|百分之[一二三四五六七八九十百零两]+(?:的)?(?:概率|可能性))/i;
 const OUTLOOK_VERIFIABLE_SIGNAL_LANGUAGE = /(?:指数|价格|走势|趋势|结构|成交|量能|宽度|涨跌|行业|板块|风格|资金|波动|风险|利率|汇率|收益率|宏观|代理|信号|数据|盈利|估值|事件|政策|新闻|阶段表现|市场内部)/;
+const DIRECTIONAL_UNSAFE_TEXT = /(?:<\/?script|javascript:|onerror\s*=|onload\s*=)/i;
+const DIRECTIONAL_NUMERIC_TEXT = /[0-9０-９]/;
 const MARKET_NEWS_PATTERNS = Object.freeze({
   cn: /(?:A股|沪指|上证|深证|深成指|创业板|科创板|北交所|沪深|两市|沪市|深市|人民币|中国央行|人民银行|证监会)/i,
   hk: /(?:港股|香港股市|恒生|恒指|国企指数|恒生科技|港交所|联交所|南向资金|港元)/i,
@@ -614,6 +618,176 @@ function parseProminentFieldsWithFallback(parsed, aligned, fallback, validationW
   return result;
 }
 
+function requireDirectionalText(value, field, maxLength = 260, minLength = 8) {
+  const text = requireProminentText(value, field, maxLength);
+  if (text.length < minLength) throw new Error(`AI 盘后复盘 ${field} 信息量不足`);
+  if (DIRECTIONAL_UNSAFE_TEXT.test(text)) throw new Error(`AI 盘后复盘 ${field} 含不安全内容`);
+  if (DIRECTIONAL_NUMERIC_TEXT.test(text)) {
+    throw new Error(`AI 盘后复盘 ${field} 不得自行书写数字，应引用服务端 metricRefs`);
+  }
+  return text;
+}
+
+function parseWhitelistedRefs(value, field, allowed, { min = 0, max = 8 } = {}) {
+  const refs = [...new Set((Array.isArray(value) ? value : [])
+    .map((item) => String(item || ''))
+    .filter(Boolean))].slice(0, max);
+  if (refs.length < min || refs.some((item) => !allowed.has(item))) {
+    throw new Error(`AI 盘后复盘 ${field} 非法`);
+  }
+  return refs;
+}
+
+function parseDirectionalModelOutput(value, {
+  allowedSignalIds,
+  allowedMetricIds,
+  alignedEvidenceRefs,
+  allowedCitationRefs,
+  fallback,
+  validationWarnings,
+}) {
+  if (!fallback) return null;
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const sourceInterpretation = source.interpretation
+    && typeof source.interpretation === 'object' && !Array.isArray(source.interpretation)
+    ? source.interpretation : {};
+  const safeInterpretation = fallback.interpretation
+    && typeof fallback.interpretation === 'object'
+    ? fallback.interpretation
+    : {
+        alignment: '规则信号仅作证据整理，不按数量投票决定总体方向。',
+        keyCounterEvidence: '覆盖不足是当前最重要的反证。',
+        nextSessionFocus: '优先验证核心指数结构与可用参与度信号。',
+        signalRefs: [],
+        evidenceRefs: [],
+      };
+  const interpretation = {};
+  const parseOrFallback = (field, parse, fallbackValue) => {
+    try { return parse(); }
+    catch (error) {
+      validationWarnings.push({
+        code: 'directional_field_fallback',
+        field,
+        reason: String(error && error.message || ''),
+      });
+      return fallbackValue;
+    }
+  };
+  for (const field of ['alignment', 'keyCounterEvidence', 'nextSessionFocus']) {
+    interpretation[field] = parseOrFallback(
+      `interpretation.${field}`,
+      () => requireDirectionalText(
+        sourceInterpretation[field], `directionalSignals.interpretation.${field}`, 300,
+      ),
+      safeInterpretation[field],
+    );
+  }
+  interpretation.signalRefs = parseOrFallback(
+    'interpretation.signalRefs',
+    () => parseWhitelistedRefs(
+      sourceInterpretation.signalRefs,
+      'directionalSignals.interpretation.signalRefs',
+      allowedSignalIds,
+      { min: allowedSignalIds.size ? 1 : 0 },
+    ),
+    safeInterpretation.signalRefs,
+  );
+  interpretation.metricRefs = parseOrFallback(
+    'interpretation.metricRefs',
+    () => parseWhitelistedRefs(
+      sourceInterpretation.metricRefs,
+      'directionalSignals.interpretation.metricRefs',
+      allowedMetricIds,
+    ),
+    [],
+  );
+  interpretation.evidenceRefs = parseOrFallback(
+    'interpretation.evidenceRefs',
+    () => parseWhitelistedRefs(
+      sourceInterpretation.evidenceRefs,
+      'directionalSignals.interpretation.evidenceRefs',
+      alignedEvidenceRefs,
+      { min: alignedEvidenceRefs.size ? 1 : 0, max: 6 },
+    ),
+    safeInterpretation.evidenceRefs,
+  );
+
+  const eventSignals = [];
+  const sourceEvents = Array.isArray(source.eventSignals) ? source.eventSignals.slice(0, 6) : [];
+  sourceEvents.forEach((item, index) => {
+    try {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        throw new Error('格式异常');
+      }
+      const side = String(item.side || '');
+      const state = String(item.state || '');
+      if (!VALID_SIGNAL_SIDES.has(side) || !VALID_SIGNAL_STATES.has(state)) {
+        throw new Error('方向或状态非法');
+      }
+      const scope = shortText(item.scope, 100);
+      if (!scope || !/^(?:market|sector|industry|stock)(?::[A-Za-z0-9.^=_-]{1,24})?$/.test(scope)) {
+        throw new Error('scope 非法');
+      }
+      const newsRefs = parseWhitelistedRefs(
+        item.newsRefs, `directionalSignals.eventSignals[${index}].newsRefs`,
+        allowedCitationRefs, { min: 1, max: 3 },
+      );
+      const reportedFact = requireDirectionalText(
+        item.reportedFact, `directionalSignals.eventSignals[${index}].reportedFact`, 260,
+      );
+      if (!REPORTED_ATTRIBUTION_LANGUAGE.test(reportedFact)) {
+        throw new Error('报道事实缺少来源归属');
+      }
+      const confirmingSignalIds = parseWhitelistedRefs(
+        item.confirmingSignalIds,
+        `directionalSignals.eventSignals[${index}].confirmingSignalIds`,
+        allowedSignalIds,
+      );
+      const contradictingSignalIds = parseWhitelistedRefs(
+        item.contradictingSignalIds,
+        `directionalSignals.eventSignals[${index}].contradictingSignalIds`,
+        allowedSignalIds,
+      );
+      const pendingConditions = (Array.isArray(item.pendingConditions)
+        ? item.pendingConditions : []).slice(0, 3).map((text, itemIndex) => requireDirectionalText(
+        text, `directionalSignals.eventSignals[${index}].pendingConditions[${itemIndex}]`, 180,
+      ));
+      const invalidations = (Array.isArray(item.invalidations)
+        ? item.invalidations : []).slice(0, 3).map((text, itemIndex) => requireDirectionalText(
+        text, `directionalSignals.eventSignals[${index}].invalidations[${itemIndex}]`, 180,
+      ));
+      if (!pendingConditions.length || !invalidations.length) throw new Error('缺少待验证或失效条件');
+      eventSignals.push({
+        id: `event:${index + 1}`,
+        label: requireDirectionalText(
+          item.label, `directionalSignals.eventSignals[${index}].label`, 100, 2,
+        ),
+        side,
+        scope,
+        state,
+        newsRefs,
+        evidenceLevel: 'headline_only',
+        reportedFact,
+        transmissionHypothesis: requireDirectionalText(
+          item.transmissionHypothesis,
+          `directionalSignals.eventSignals[${index}].transmissionHypothesis`, 300,
+        ),
+        confirmingSignalIds,
+        contradictingSignalIds,
+        pendingConditions,
+        invalidations,
+      });
+    } catch (error) {
+      validationWarnings.push({
+        code: 'directional_event_dropped',
+        field: `eventSignals[${index}]`,
+        reason: String(error && error.message || ''),
+      });
+    }
+  });
+  return { interpretation, eventSignals };
+}
+
 function parseMarketReview(content, {
   allowedEvidenceRefs = [],
   allowedCitationRefs = [],
@@ -621,6 +795,9 @@ function parseMarketReview(content, {
   discardInvalidSectionItems = false,
   prominentFallback = null,
   synthesisFallback = null,
+  directionalFallback = null,
+  allowedSignalIds = [],
+  allowedMetricIds = [],
 } = {}) {
   const parsed = parseJSONContent(content);
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -646,6 +823,14 @@ function parseMarketReview(content, {
     synthesisFallback,
     validationWarnings,
   );
+  const directionalSignals = parseDirectionalModelOutput(parsed.directionalSignals, {
+    allowedSignalIds: new Set(allowedSignalIds),
+    allowedMetricIds: new Set(allowedMetricIds),
+    alignedEvidenceRefs: aligned,
+    allowedCitationRefs: citations,
+    fallback: directionalFallback,
+    validationWarnings,
+  });
   if (!parsed.sections || typeof parsed.sections !== 'object' || Array.isArray(parsed.sections)) {
     throw new Error('AI 盘后复盘 sections 格式异常');
   }
@@ -662,6 +847,7 @@ function parseMarketReview(content, {
   return {
     ...prominent,
     synthesisOutlook,
+    directionalSignals,
     sections,
     validationWarnings,
   };
@@ -715,7 +901,10 @@ function compactRank(rows) {
 
 function compactOverview(market, data) {
   if (market === 'us') {
-    return (Array.isArray(data) ? data : []).map((row) => compactQuote(row, { kind: 'macro' }));
+    return (Array.isArray(data) ? data : []).map((row) => ({
+      ...compactQuote(row, { kind: 'macro' }),
+      snapshotBasis: shortText(row && row.snapshotBasis, 60) || null,
+    }));
   }
   const comparison = data && (data.turnoverComparison || data.comparison);
   const up = finiteOrNull(data && data.up);
@@ -787,7 +976,7 @@ function newsRelevantToMarket(title, market) {
   return !pattern || pattern.test(String(title || ''));
 }
 
-function compactNews(rows, { market = null, reviewDate = '' } = {}) {
+function compactNews(rows, { market = null, reviewDate = '', cutoffAt = null } = {}) {
   const seen = new Set();
   const items = [];
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -798,7 +987,10 @@ function compactNews(rows, { market = null, reviewDate = '' } = {}) {
     const publishedAt = new Date(timestamp).toISOString();
     const publishedDate = market ? dateForMarket(publishedAt, market) : publishedAt.slice(0, 10);
     if (reviewDate && (!publishedDate || publishedDate > reviewDate)) continue;
-    if (market && reviewDate && timestamp > marketCloseTimestamp(market, reviewDate)) continue;
+    const cutoffTimestamp = Number.isFinite(Date.parse(cutoffAt))
+      ? Date.parse(cutoffAt)
+      : market && reviewDate ? marketCloseTimestamp(market, reviewDate) : null;
+    if (Number.isFinite(cutoffTimestamp) && timestamp > cutoffTimestamp) continue;
     if (market && !newsRelevantToMarket(title, market)) continue;
     seen.add(url);
     items.push({
@@ -826,7 +1018,7 @@ function latestDatedValue(values) {
     .sort((left, right) => Date.parse(right) - Date.parse(left))[0] || '';
 }
 
-function freezeOptionalComponent(name, data, meta, market, reviewDate) {
+function freezeOptionalComponent(name, data, meta, market, reviewDate, cutoffAt = null) {
   if (meta.stale) return { excluded: true, reason: `${name} 使用旧缓存，已排除` };
   if (name === 'news') {
     if (!Array.isArray(data) || !data.length) {
@@ -839,7 +1031,7 @@ function freezeOptionalComponent(name, data, meta, market, reviewDate) {
     const kept = data.filter((row) => {
       const itemDate = dateTextForMarket(row && row.asOf, market);
       return itemDate && itemDate <= reviewDate
-        && isAtOrBeforeReviewClose(row && row.asOf, market, reviewDate);
+        && isAtOrBeforeReviewClose(row && row.asOf, market, reviewDate, cutoffAt);
     });
     if (!kept.length) return { excluded: true, reason: `${name} 无可锁定至复盘日的快照` };
     const latest = latestDatedValue(kept.map((row) => row.asOf));
@@ -853,7 +1045,7 @@ function freezeOptionalComponent(name, data, meta, market, reviewDate) {
     const kept = data.sectors.filter((row) => {
       const itemDate = dateTextForMarket(row && row.asOf, market);
       return itemDate && itemDate <= reviewDate
-        && isAtOrBeforeReviewClose(row && row.asOf, market, reviewDate);
+        && isAtOrBeforeReviewClose(row && row.asOf, market, reviewDate, cutoffAt);
     });
     if (!kept.length) return { excluded: true, reason: `${name} 无可锁定至复盘日的快照` };
     const frozen = compactUSSectors(kept);
@@ -870,7 +1062,7 @@ function freezeOptionalComponent(name, data, meta, market, reviewDate) {
       const kept = data.filter((row) => {
         const itemDate = dateTextForMarket(row && row.asOf, market);
         return itemDate && itemDate <= reviewDate
-          && isAtOrBeforeReviewClose(row && row.asOf, market, reviewDate);
+          && isAtOrBeforeReviewClose(row && row.asOf, market, reviewDate, cutoffAt);
       });
       if (!kept.length) return { excluded: true, reason: `${name} 无可锁定至复盘日的快照` };
       const latest = latestDatedValue(kept.map((row) => row.asOf));
@@ -896,9 +1088,11 @@ function freezeOptionalComponent(name, data, meta, market, reviewDate) {
     const fetchedDate = Number.isFinite(fetchedAt)
       ? dateForMarket(new Date(fetchedAt).toISOString(), market)
       : '';
-    const stableAt = marketClockTimestamp(market, reviewDate, MARKET_CLOSE_BUFFER_MINUTES[market]);
+    const closeAt = Number.isFinite(Date.parse(cutoffAt))
+      ? Date.parse(cutoffAt) : marketCloseTimestamp(market, reviewDate);
+    const stableAt = closeAt
+      + (MARKET_CLOSE_BUFFER_MINUTES[market] - MARKET_CLOSE_MINUTES[market]) * 60000;
     if (fetchedDate === reviewDate && fetchedAt >= stableAt) {
-      const closeAt = marketCloseTimestamp(market, reviewDate);
       return {
         data,
         meta: {
@@ -915,7 +1109,7 @@ function freezeOptionalComponent(name, data, meta, market, reviewDate) {
     : meta.asOf;
   const snapshotDate = intrinsicDate || dateTextForMarket(meta.asOf, market);
   if (!snapshotDate || snapshotDate > reviewDate
-      || !isAtOrBeforeReviewClose(snapshotValue, market, reviewDate)) {
+      || !isAtOrBeforeReviewClose(snapshotValue, market, reviewDate, cutoffAt)) {
     return { excluded: true, reason: `${name} 快照时点无法锁定至复盘日` };
   }
   return {
@@ -924,7 +1118,7 @@ function freezeOptionalComponent(name, data, meta, market, reviewDate) {
   };
 }
 
-function componentDateInfo(name, data, meta, market) {
+function componentDateInfo(name, data, meta, market, reviewDate = '', cutoffAt = null) {
   let values = [];
   let expected = 0;
   if (name === 'indexHistory') {
@@ -955,7 +1149,11 @@ function componentDateInfo(name, data, meta, market) {
     values = [meta.asOf];
     expected = 1;
   }
-  const timestamps = values.map((value) => timestampForMarketValue(value, market)).filter(Number.isFinite);
+  const parsedCutoff = Number.isFinite(Date.parse(cutoffAt)) ? Date.parse(cutoffAt) : null;
+  const timestamps = values.map((value) => (
+    parsedCutoff != null && String(value || '').trim() === reviewDate
+      ? parsedCutoff : timestampForMarketValue(value, market)
+  )).filter(Number.isFinite);
   const dates = timestamps.map((timestamp) => dateForMarket(new Date(timestamp).toISOString(), market));
   return {
     dates,
@@ -964,11 +1162,14 @@ function componentDateInfo(name, data, meta, market) {
   };
 }
 
-function associationEligibleComponents(components, market, reviewDate) {
-  const closeAt = marketCloseTimestamp(market, reviewDate);
+function associationEligibleComponents(components, market, reviewDate, cutoffAt = null) {
+  const closeAt = Number.isFinite(Date.parse(cutoffAt))
+    ? Date.parse(cutoffAt) : marketCloseTimestamp(market, reviewDate);
   return components.filter((component) => {
     if (component.meta.stale) return false;
-    const info = componentDateInfo(component.name, component.data, component.meta, market);
+    const info = componentDateInfo(
+      component.name, component.data, component.meta, market, reviewDate, cutoffAt,
+    );
     return info.complete
       && info.dates.every((date) => date === reviewDate)
       && info.timestamps.every((timestamp) => (
@@ -1002,7 +1203,15 @@ function localClock(market, date) {
   };
 }
 
-function isCompletedReviewDate(market, reviewDate, date) {
+function isCompletedReviewDate(market, reviewDate, date, tradingCalendar = null) {
+  if (tradingCalendar && typeof tradingCalendar.session === 'function') {
+    const session = tradingCalendar.session(market, reviewDate);
+    if (session.calendarStatus === 'known') {
+      if (!session.isTradingDay || !Number.isFinite(Date.parse(session.cutoffAt))) return false;
+      const bufferMinutes = MARKET_CLOSE_BUFFER_MINUTES[market] - MARKET_CLOSE_MINUTES[market];
+      return date.getTime() >= Date.parse(session.cutoffAt) + bufferMinutes * 60000;
+    }
+  }
   const local = localClock(market, date);
   if (reviewDate < local.date) return true;
   if (reviewDate > local.date) return false;
@@ -1073,9 +1282,10 @@ function timestampForMarketValue(value, market) {
   return Date.parse(text);
 }
 
-function isAtOrBeforeReviewClose(value, market, reviewDate) {
+function isAtOrBeforeReviewClose(value, market, reviewDate, cutoffAt = null) {
   const timestamp = timestampForMarketValue(value, market);
-  const cutoff = marketCloseTimestamp(market, reviewDate);
+  const cutoff = Number.isFinite(Date.parse(cutoffAt))
+    ? Date.parse(cutoffAt) : marketCloseTimestamp(market, reviewDate);
   return Number.isFinite(timestamp) && Number.isFinite(cutoff) && timestamp <= cutoff;
 }
 
@@ -1341,9 +1551,33 @@ function storedSynthesisOutlook(parsed, confidence, { fallbackFields = [] } = {}
   };
 }
 
+function buildSignalSummary(directionalSignals) {
+  if (!directionalSignals) return null;
+  const observed = (Array.isArray(directionalSignals.computedSignals)
+    ? directionalSignals.computedSignals : [])
+    .filter((signal) => signal && signal.state === 'observed');
+  const bullish = observed.filter((signal) => signal.side === 'bullish');
+  const bearish = observed.filter((signal) => signal.side === 'bearish');
+  return {
+    status: directionalSignals.status,
+    availableFactorGroups: Array.isArray(directionalSignals.availableGroups)
+      ? directionalSignals.availableGroups.length : 0,
+    missingFactorGroups: Array.isArray(directionalSignals.missingGroups)
+      ? directionalSignals.missingGroups : [],
+    bullishObserved: bullish.length,
+    bearishObserved: bearish.length,
+    topBullishSignalIds: bullish.slice(0, 2).map((signal) => signal.id),
+    topBearishSignalIds: bearish.slice(0, 2).map((signal) => signal.id),
+    methodology: directionalSignals.methodology,
+    isPredictionProbability: false,
+  };
+}
+
 function createMarketReviewService({
   marketService,
   marketReviewStore,
+  marketSignalService = null,
+  tradingCalendar = null,
   llmConfigStore,
   llmClient,
   marketMeta,
@@ -1442,6 +1676,11 @@ function createMarketReviewService({
     if (!completedIndexSnapshot(primaryIndex, primaryHistory)) {
       throw new Error('核心指数完整日线快照不可用');
     }
+    const calendarSession = tradingCalendar && typeof tradingCalendar.session === 'function'
+      ? tradingCalendar.session(market, reviewDate) : null;
+    const cutoffAt = calendarSession && calendarSession.cutoffAt
+      ? calendarSession.cutoffAt
+      : new Date(marketCloseTimestamp(market, reviewDate)).toISOString();
 
     const historyByCode = new Map(histories.map((item) => [item.code, item]));
     const validCodes = new Set([primaryCode]);
@@ -1499,13 +1738,15 @@ function createMarketReviewService({
       );
     } else {
       specs.push(
-        ['macroProxies', () => marketService.overview('us'), (data) => compactOverview('us', data), { market: 'us', currency: null }],
+        ['macroProxies', () => marketService.overview('us', { cutoffAt }), (data) => compactOverview('us', data), { market: 'us', currency: null }],
         ['usSectorProxies', () => marketService.quotes(US_SECTOR_CODES), compactUSSectors, { market: 'us', currency: 'USD' }],
         ['representativeGainers', () => marketService.rank('us', 'up'), compactRank, { market: 'us' }],
         ['representativeLosers', () => marketService.rank('us', 'down'), compactRank, { market: 'us' }],
       );
     }
-    specs.push(['news', () => marketService.news(), (data) => compactNews(data, { market, reviewDate }), {
+    specs.push(['news', () => marketService.news(), (data) => compactNews(data, {
+      market, reviewDate, cutoffAt,
+    }), {
       market: null, currency: null, timezone: null, source: '新浪财经滚动新闻',
     }]);
     const results = await Promise.allSettled(specs.map(([, load]) => load()));
@@ -1521,7 +1762,7 @@ function createMarketReviewService({
         return;
       }
       const frozen = freezeOptionalComponent(
-        name, data, marketMeta(result.value, metaSpec), market, reviewDate,
+        name, data, marketMeta(result.value, metaSpec), market, reviewDate, cutoffAt,
       );
       if (frozen.excluded || !componentHasData(name, frozen.data)) {
         addMissing(name);
@@ -1534,7 +1775,61 @@ function createMarketReviewService({
       components.push({ name, data: frozen.data, meta: frozen.meta });
     });
 
-    const associationEvidenceRefs = associationEligibleComponents(components, market, reviewDate);
+    const baseAssociationEvidenceRefs = associationEligibleComponents(
+      components, market, reviewDate, cutoffAt,
+    );
+    let directionalSignals = null;
+    if (market !== 'hk' && marketSignalService
+        && typeof marketSignalService.buildSnapshot === 'function') {
+      try {
+        directionalSignals = await marketSignalService.buildSnapshot({
+          market,
+          reviewDate,
+          components,
+          indexHistories: validHistories.map(({ code, name, entry }) => ({
+            code,
+            name,
+            rows: entry.data,
+            source: marketMeta(entry, { market }).source,
+          })),
+          associationEvidenceRefs: baseAssociationEvidenceRefs,
+        });
+        if (directionalSignals) {
+          components.push({
+            name: 'directionalSignalFacts',
+            data: {
+              status: directionalSignals.status,
+              rulesVersion: directionalSignals.rulesVersion,
+              methodology: directionalSignals.methodology,
+              isPredictionProbability: false,
+              metrics: directionalSignals.metrics,
+              computedSignals: directionalSignals.computedSignals,
+              watchTriggers: directionalSignals.watchTriggers,
+              availableGroups: directionalSignals.availableGroups,
+              missingGroups: directionalSignals.missingGroups,
+              qualityWarnings: directionalSignals.qualityWarnings,
+              coverage: directionalSignals.coverage,
+            },
+            meta: {
+              source: '服务器规则信号',
+              currency: null,
+              timezone: MARKET_TIMEZONES[market],
+              asOf: reviewDate,
+              asOfBasis: 'completed_session',
+              stale: false,
+              adjustmentBasis: 'mixed_by_metric',
+            },
+          });
+        }
+      } catch (error) {
+        addMissing('directionalSignalFacts');
+        addLimitation(`多空信号快照不可用：${shortText(error.message, 160)}`);
+      }
+    }
+    const associationEvidenceRefs = [
+      ...baseAssociationEvidenceRefs,
+      ...(directionalSignals ? ['directionalSignalFacts'] : []),
+    ];
     const metrics = deriveMarketMetrics(market, components);
     const serverStance = deterministicStance(market, metrics);
     const confidence = confidenceForEvidence(market, components, missing);
@@ -1542,6 +1837,8 @@ function createMarketReviewService({
     const dataWarnings = [
       ...(missing.length ? [`数据组件缺失：${missing.join('、')}`] : []),
       ...(staleComponents.length ? [`使用旧缓存：${staleComponents.join('、')}`] : []),
+      ...(directionalSignals && directionalSignals.qualityWarnings.length
+        ? directionalSignals.qualityWarnings : []),
     ];
     const overviewData = components.find((component) => component.name === 'overview')?.data;
     const turnoverBasis = overviewData && overviewData.turnoverComparison
@@ -1568,6 +1865,7 @@ function createMarketReviewService({
       marketLabel: MARKET_LABELS[market],
       reviewDate,
       collectedAt: new Date(date).toISOString(),
+      cutoffAt,
       components,
       derived: metrics,
       serverStance,
@@ -1576,12 +1874,26 @@ function createMarketReviewService({
       dataWarnings,
       limitations,
       associationEvidenceRefs,
+      directionalSignals,
     };
   }
 
   function evidenceForModel(evidence) {
+    const directional = evidence.directionalSignals;
     return {
       ...evidence,
+      directionalSignals: directional ? {
+        status: directional.status,
+        reviewDate: directional.reviewDate,
+        cutoffAt: directional.cutoffAt,
+        capturedAt: directional.capturedAt,
+        nextSessionDate: directional.nextSessionDate,
+        calendarStatus: directional.calendarStatus,
+        rulesVersion: directional.rulesVersion,
+        methodology: directional.methodology,
+        isPredictionProbability: false,
+        inputSnapshotId: directional.inputSnapshotId,
+      } : null,
       components: evidence.components.map((component) => ({
         name: component.name,
         data: component.data,
@@ -1629,6 +1941,11 @@ function createMarketReviewService({
       discardInvalidSectionItems: true,
       prominentFallback: buildDeterministicProminent(evidence),
       synthesisFallback: buildDeterministicSynthesis(evidence),
+      directionalFallback: evidence.directionalSignals,
+      allowedSignalIds: (evidence.directionalSignals?.computedSignals || [])
+        .map((signal) => signal.id),
+      allowedMetricIds: (evidence.directionalSignals?.metrics || [])
+        .map((metric) => metric.id),
     });
     const usedCitationIds = new Set([
       ...Object.values(parsed.sections)
@@ -1636,6 +1953,8 @@ function createMarketReviewService({
       ...Object.values(parsed.synthesisOutlook.citationRefs).flat(),
       ...OUTLOOK_SCENARIO_DEFS
         .flatMap(([sourceKey]) => parsed.synthesisOutlook[sourceKey].citationRefs),
+      ...(parsed.directionalSignals?.eventSignals || [])
+        .flatMap((signal) => signal.newsRefs),
     ]);
     const citedSources = citations.filter((citation) => usedCitationIds.has(citation.id));
     const generatedAt = new Date(now()).toISOString();
@@ -1649,6 +1968,10 @@ function createMarketReviewService({
     const synthesisFallbackFields = parsed.validationWarnings
       .filter((warning) => warning.code === 'synthesis_field_fallback')
       .map((warning) => warning.field);
+    const directionalFallbackFields = parsed.validationWarnings
+      .filter((warning) => warning.code === 'directional_field_fallback'
+        || warning.code === 'directional_event_dropped')
+      .map((warning) => warning.field);
     const droppedItemCount = parsed.validationWarnings
       .filter((warning) => warning.code === 'section_item_dropped').length;
     const prominentFallbackUsed = prominentFallbackFields.length > 0;
@@ -1656,6 +1979,13 @@ function createMarketReviewService({
     const synthesisOutlook = storedSynthesisOutlook(parsed, evidence.confidence, {
       fallbackFields: synthesisFallbackFields,
     });
+    const directionalSignals = evidence.directionalSignals ? {
+      ...evidence.directionalSignals,
+      generatedAt,
+      interpretation: parsed.directionalSignals?.interpretation
+        || evidence.directionalSignals.interpretation,
+      eventSignals: parsed.directionalSignals?.eventSignals || [],
+    } : null;
     const review = {
       schemaVersion: REVIEW_SCHEMA_VERSION,
       available: true,
@@ -1665,6 +1995,11 @@ function createMarketReviewService({
       marketLabel: MARKET_LABELS[market],
       reviewDate: evidence.reviewDate,
       generatedAt,
+      ...(directionalSignals ? {
+        inputSnapshotId: directionalSignals.inputSnapshotId,
+        inputHash: directionalSignals.inputHash,
+        rulesVersion: directionalSignals.rulesVersion,
+      } : {}),
       card: {
         stance: evidence.serverStance,
         headline: parsed.headline,
@@ -1672,6 +2007,7 @@ function createMarketReviewService({
         metrics: buildCardMetrics(market, evidence),
         themes: parsed.themes,
         keyRisk: parsed.keyRisk,
+        ...(directionalSignals ? { signalSummary: buildSignalSummary(directionalSignals) } : {}),
         outlook: {
           horizon: OUTLOOK_HORIZON,
           bias: parsed.synthesisOutlook.baseCase.bias,
@@ -1690,6 +2026,7 @@ function createMarketReviewService({
         executiveSummary: parsed.executiveSummary,
         evidenceRefs: { executiveSummary: parsed.prominentEvidenceRefs.executiveSummary },
         synthesisOutlook,
+        ...(directionalSignals ? { directionalSignals } : {}),
         sections,
       },
       citations: citedSources,
@@ -1701,6 +2038,10 @@ function createMarketReviewService({
             ? `模型卡片字段 ${warning.field} 未通过结构或安全校验，仅该字段已降级`
             : warning.code === 'synthesis_field_fallback'
               ? `模型研判字段 ${warning.field} 未通过结构或安全校验，其余模型分析已保留`
+              : warning.code === 'directional_field_fallback'
+                ? `多空信号解释字段 ${warning.field} 未通过白名单或安全校验，已局部降级`
+                : warning.code === 'directional_event_dropped'
+                  ? `事件信号 ${warning.field} 未通过新闻或信号引用校验，已安全剔除`
               : `模型输出 ${warning.section}[${warning.index}] 未通过证据或因果校验，已安全剔除`
         )),
       ],
@@ -1725,8 +2066,10 @@ function createMarketReviewService({
         droppedItemCount,
         prominentFallbackUsed,
         synthesisFallbackUsed,
+        directionalFallbackUsed: directionalFallbackFields.length > 0,
         prominentFallbackFields,
         synthesisFallbackFields,
+        directionalFallbackFields,
       },
       model: shortText(config.model, 100),
       sourceSummary: sources.join(' / '),
@@ -1773,12 +2116,34 @@ function createMarketReviewService({
       }
       const clock = localClock(market, date);
       const weekend = clock.weekday === 'Sat' || clock.weekday === 'Sun';
-      if (!weekend && clock.minutes < MARKET_CLOSE_BUFFER_MINUTES[market]) {
-        return latest
-          ? readyEntry(latest, { nextReviewStatus: 'scheduled' })
-          : stateEntry(market, 'scheduled', `${MARKET_LABELS[market]}收盘且行情稳定后生成首份盘后复盘。`);
+      const calendarCandidate = tradingCalendar && typeof tradingCalendar.session === 'function'
+        ? tradingCalendar.session(market, clock.date) : null;
+      const todaySession = calendarCandidate && calendarCandidate.calendarStatus === 'known'
+        ? calendarCandidate : null;
+      const knownTradingDay = todaySession && todaySession.isTradingDay;
+      const knownClosedDay = todaySession && !todaySession.isTradingDay;
+      const todayStableAt = knownTradingDay && Number.isFinite(Date.parse(todaySession.cutoffAt))
+        ? Date.parse(todaySession.cutoffAt)
+          + (MARKET_CLOSE_BUFFER_MINUTES[market] - MARKET_CLOSE_MINUTES[market]) * 60000
+        : null;
+      const currentSessionPending = (knownTradingDay && timestamp < todayStableAt)
+        || (!todaySession && !weekend && clock.minutes < MARKET_CLOSE_BUFFER_MINUTES[market]);
+      if (currentSessionPending) {
+        const calendarPreviousSession = typeof tradingCalendar?.previousSession === 'function'
+          ? tradingCalendar.previousSession(market, clock.date) : null;
+        const previousSessionDate = calendarPreviousSession || previousWeekday(clock.date);
+        const hasPendingCatchUp = previousSessionDate
+          && latest && latest.reviewDate < previousSessionDate;
+        if (!hasPendingCatchUp) {
+          return latest
+            ? readyEntry(latest, { nextReviewStatus: 'scheduled' })
+            : stateEntry(market, 'scheduled', `${MARKET_LABELS[market]}收盘且行情稳定后生成首份盘后复盘。`);
+        }
       }
-      if (weekend && latest && latest.reviewDate >= previousWeekday(clock.date)) {
+      const previousSessionDate = knownClosedDay
+        && typeof tradingCalendar.previousSession === 'function'
+        ? tradingCalendar.previousSession(market, clock.date) : previousWeekday(clock.date);
+      if ((knownClosedDay || weekend) && latest && latest.reviewDate >= previousSessionDate) {
         return readyEntry(latest, { nextReviewStatus: 'scheduled' });
       }
       if (latest && latest.reviewDate === clock.date) return readyEntry(latest);
@@ -1794,7 +2159,7 @@ function createMarketReviewService({
       let evidence;
       try {
         evidence = await collectEvidence(market, date);
-        if (!isCompletedReviewDate(market, evidence.reviewDate, date)) {
+        if (!isCompletedReviewDate(market, evidence.reviewDate, date, tradingCalendar)) {
           return latest
             ? readyEntry(latest, { nextReviewStatus: 'scheduled' })
             : stateEntry(market, 'scheduled', '等待当日收盘数据完整后生成复盘。');

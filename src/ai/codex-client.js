@@ -301,10 +301,8 @@ function createCodexClient({ env = process.env, spawnImpl = spawn, now = Date.no
         clientInfo: { name: 'market_dashboard', version: '1.0.0' },
         capabilities: { experimentalApi: true },
       });
-      // Experimental wire contracts are tested against these CLI releases.
-      if (!/\b0\.151\.0\b/.test(initialized?.userAgent || '')) {
-        throw codexError('CLI 版本未经验证，请使用 0.151.0');
-      }
+      // Compatibility is enforced by the protocol, routing, permission and
+      // response-shape checks below instead of a CLI version allowlist.
       rpc.send({ method: 'initialized' });
       const account = await rpc.request('account/read', { refreshToken: false });
       if (account?.account?.type !== 'chatgpt') throw codexError('请在服务器运行 codex login --device-auth，使用 ChatGPT 登录');
@@ -397,4 +395,13 @@ function createCodexClient({ env = process.env, spawnImpl = spawn, now = Date.no
   };
 }
 
-module.exports = { createCodexClient, SAFE_CONFIG, PERMISSIONS_PROFILE, safeEnvironment, quotaStatus, actionSchema, decodeAction, hasOfficialRouting };
+module.exports = {
+  createCodexClient,
+  SAFE_CONFIG,
+  PERMISSIONS_PROFILE,
+  safeEnvironment,
+  quotaStatus,
+  actionSchema,
+  decodeAction,
+  hasOfficialRouting,
+};

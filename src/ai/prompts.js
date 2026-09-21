@@ -143,6 +143,29 @@ function marketReviewSystemPrompt() {
       "citationRefs": []
     }
   },
+  "directionalSignals": {
+    "interpretation": {
+      "alignment": "说明哪些服务端信号互相确认、哪些背离，不按数量投票",
+      "keyCounterEvidence": "指出最重要的反证或覆盖边界",
+      "nextSessionFocus": "下个交易日最优先验证的条件，不写精确预测",
+      "signalRefs": ["只能引用 directionalSignalFacts.computedSignals 中的真实 id"],
+      "metricRefs": ["只能引用 directionalSignalFacts.metrics 中的真实 id"],
+      "evidenceRefs": ["directionalSignalFacts"]
+    },
+    "eventSignals": [{
+      "label": "事件简称",
+      "side": "bullish|bearish|mixed|neutral",
+      "scope": "market|sector:代码|industry:代码|stock:代码",
+      "state": "observed|conditional",
+      "newsRefs": ["news:1"],
+      "reportedFact": "据具体来源标题或报道线索可确认的事实",
+      "transmissionHypothesis": "模型提出、仍待行情验证的传导假说",
+      "confirmingSignalIds": [],
+      "contradictingSignalIds": [],
+      "pendingConditions": ["尚未兑现的条件"],
+      "invalidations": ["使该事件判断失效的条件"]
+    }]
+  },
   "sections": {
     "indexPerformance": [{"text":"...","claimType":"observation|association|analysis","evidenceRefs":["indices"],"citationRefs":[]}],
     "breadthLiquidity": [],
@@ -164,7 +187,9 @@ function marketReviewSystemPrompt() {
 7. 服务端已将证据冻结到 reviewDate：复盘日之后的新闻/快照和 stale 可选组件不会输入，news 还经过目标市场相关性筛选。若仍看到 meta.stale=true，不得引用该组件作为当日新鲜事实，必须明确写成旧缓存口径。
 8. risks 写市场风险，不重复 dataWarnings 中的缓存、缺失或时点问题。headline、cardSummary、themes、keyRisk、executiveSummary 和 synthesisOutlook 都应保留模型基于证据形成的观点，而不是只复述数据；prominentEvidenceRefs 与 synthesisOutlook 的 evidenceRefs 只能引用 associationEvidenceRefs 中的同日组件。新闻、政策或事件归因仍必须有白名单来源；前瞻只能从复盘日收盘前证据构建，不得暗示使用了盘后新信息。
 9. 美股涨跌榜与 A/H 股一样只是质量筛选后的代表性样本，不能冒充全市场宽度或指数成分贡献。
-10. 各 section 建议 2至4条；确无证据时返回空数组。integratedAssessment 建议 250至500字，summary 建议 80至150字，各情景 text 建议 60至160字。文字要具体、专业、信息密度高，先给结论和方向倾向，再解释证据、反证与失效条件。不要因为需要保留风险边界就把基准情景写成双向套话。`;
+10. 仅当输入存在 directionalSignalFacts 时填写 directionalSignals；港股或历史输入缺少该组件时返回空对象。computedSignals 的 side/state、metrics 数值、规则版本、时间戳和来源都由服务端拥有，你不得改写或创造。interpretation 与 eventSignals 只能引用输入中真实 signal/metric/news ID；解释文字不得自行书写数字，需要数值时只填 metricRefs。不得输出综合多空分数、涨跌概率、胜率、目标价、仓位或交易建议。相关 ETF 同涨不能包装成多个独立宏观确认，缺失不可写成中性或“无利空”。
+11. eventSignals 必须有白名单 newsRefs，并明确区分来源报道事实、模型传导假说、行情确认/反证和待兑现条件；当前新闻只有标题时只能按 headline_only 理解。可能发生的事件只能是 conditional，不能写成已兑现利好/利空；没有可靠消息时返回空数组，不得用模型记忆补新闻。
+12. 各 section 建议 2至4条；确无证据时返回空数组。integratedAssessment 建议 250至500字，summary 建议 80至150字，各情景 text 建议 60至160字。文字要具体、专业、信息密度高，先给结论和方向倾向，再解释证据、反证与失效条件。不要因为需要保留风险边界就把基准情景写成双向套话。`;
 }
 
 module.exports = {

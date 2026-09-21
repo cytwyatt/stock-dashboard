@@ -5,7 +5,10 @@ const assert = require('node:assert/strict');
 const { EventEmitter } = require('node:events');
 const { PassThrough, Writable } = require('node:stream');
 const fs = require('node:fs');
-const { createCodexClient, SAFE_CONFIG, PERMISSIONS_PROFILE, quotaStatus, decodeAction, hasOfficialRouting } = require('../src/ai/codex-client');
+const {
+  createCodexClient, SAFE_CONFIG, PERMISSIONS_PROFILE,
+  quotaStatus, decodeAction, hasOfficialRouting,
+} = require('../src/ai/codex-client');
 const { createLLMClient } = require('../src/ai/llm-client');
 
 const model = 'test-model';
@@ -36,7 +39,7 @@ function mockProcess(options = {}) {
       queueMicrotask(() => {
         const p = message.params;
         const result = {
-          initialize: { userAgent: 'codex/0.151.0' },
+          initialize: { userAgent: options.userAgent || 'codex/0.151.0' },
           'account/read': { account: { type: options.authType || 'chatgpt', email: 'never-expose@example.test' } },
           'account/rateLimits/read': options.quotas || quotas,
           'model/list': { data: [{ model, isDefault: true }] },
@@ -124,6 +127,14 @@ test('status check reads account/models/quota without starting an inference or e
   assert.deepEqual(status.models, [model]);
   assert.equal(h.requests.some((r) => /^(thread|turn)\//.test(r.method)), false);
   assert.doesNotMatch(JSON.stringify(status), /never-expose|apiKey/);
+});
+
+test('Codex CLI compatibility is validated by protocol behavior instead of a version allowlist', async () => {
+  for (const userAgent of ['codex/0.151.0', 'codex-cli/0.154.0', 'codex/future-version']) {
+    const h = mockProcess({ userAgent });
+    assert.equal((await h.client.testConfig(config)).ok, true);
+    assert(h.requests.some((request) => request.method === 'account/read'));
+  }
 });
 
 test('quota and authentication failures are fail-closed before inference', async (t) => {

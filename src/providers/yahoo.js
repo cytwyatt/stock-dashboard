@@ -173,15 +173,40 @@ function yahooExtendedQuotes(result, {
 function parseSparkQuotes(payload, defs, {
   annotateMarketData,
   formatTime = fmtTimeInTZ,
+  cutoffAt = null,
 } = {}) {
   const results = (payload.spark && payload.spark.result) || [];
+  const cutoffTimestamp = Number.isFinite(Date.parse(cutoffAt)) ? Date.parse(cutoffAt) : null;
   const quotes = defs.map(({ code, name, unit }) => {
     const result = results.find((item) => item.symbol === code);
     const response = result && result.response && result.response[0];
     const meta = response && response.meta;
     if (!meta) return null;
     const prev = meta.chartPreviousClose || meta.previousClose || 0;
-    const price = meta.regularMarketPrice || 0;
+    let price = meta.regularMarketPrice || 0;
+    let asOfTimestamp = Number(meta.regularMarketTime) * 1000 || null;
+    let snapshotBasis = 'latest_regular';
+    if (cutoffTimestamp != null) {
+      const timestamps = Array.isArray(response.timestamp) ? response.timestamp : [];
+      const closes = response.indicators && response.indicators.quote
+        && response.indicators.quote[0] && response.indicators.quote[0].close || [];
+      let cutoffPoint = null;
+      for (let index = 0; index < timestamps.length; index++) {
+        const timestamp = Number(timestamps[index]) * 1000;
+        const rawPrice = closes[index];
+        const candidatePrice = rawPrice == null || rawPrice === '' ? NaN : Number(rawPrice);
+        if (!Number.isFinite(timestamp) || !Number.isFinite(candidatePrice)
+            || timestamp > cutoffTimestamp || cutoffTimestamp - timestamp > 12 * 60 * 60 * 1000) continue;
+        if (!cutoffPoint || timestamp > cutoffPoint.timestamp) {
+          cutoffPoint = { timestamp, price: candidatePrice };
+        }
+      }
+      if (cutoffPoint) {
+        price = cutoffPoint.price;
+        asOfTimestamp = cutoffPoint.timestamp;
+        snapshotBasis = 'intraday_at_or_before_cutoff';
+      }
+    }
     const extendedQuotes = yahooExtendedQuotes(response, {
       previousClose: prev,
       regularPrice: price,
@@ -203,7 +228,8 @@ function parseSparkQuotes(payload, defs, {
       time: meta.regularMarketTime
         ? `美东 ${formatTime(meta.regularMarketTime, meta.exchangeTimezoneName || 'America/New_York')}`
         : '',
-      asOf: meta.regularMarketTime ? new Date(meta.regularMarketTime * 1000).toISOString() : '',
+      asOf: Number.isFinite(asOfTimestamp) ? new Date(asOfTimestamp).toISOString() : '',
+      snapshotBasis,
       preMarket: extendedQuotes.preMarket,
       postMarket: extendedQuotes.postMarket,
       extended: extendedQuotes.extended,
@@ -540,11 +566,15 @@ function createYahooProvider({
     return result;
   }
 
-  async function sparkQuotes(defs) {
+  async function sparkQuotes(defs, options = {}) {
     const symbols = defs.map((def) => def.code).join(',');
     const url = `https://query1.finance.yahoo.com/v7/finance/spark?symbols=${encodeURIComponent(symbols)}&range=1d&interval=5m&includePrePost=true`;
     const payload = JSON.parse(await yahooFetch(url));
-    return parseSparkQuotes(payload, defs, { annotateMarketData, formatTime });
+    return parseSparkQuotes(payload, defs, {
+      annotateMarketData,
+      formatTime,
+      cutoffAt: options.cutoffAt,
+    });
   }
 
   async function getMinute(code) {
@@ -602,7 +632,7 @@ function createYahooProvider({
     getQuote,
     getStockNews,
     getQuotes: (codes) => sparkQuotes(codes.map((code) => ({ code }))),
-    getOverview: () => sparkQuotes(US_MACRO),
+    getOverview: (options) => sparkQuotes(US_MACRO, options),
   };
 }
 
