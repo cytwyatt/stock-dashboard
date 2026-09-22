@@ -7,7 +7,7 @@ const { PassThrough, Writable } = require('node:stream');
 const fs = require('node:fs');
 const {
   createCodexClient, SAFE_CONFIG, PERMISSIONS_PROFILE,
-  quotaStatus, decodeAction, hasOfficialRouting,
+  decodeAction, hasOfficialRouting,
 } = require('../src/ai/codex-client');
 const { createLLMClient } = require('../src/ai/llm-client');
 
@@ -18,7 +18,6 @@ const tools = [{ type: 'function', function: {
     type: 'object', properties: { code: { type: 'string' } }, required: ['code'],
   },
 } }];
-const quotas = { rateLimitsByLimitId: { codex: { primary: { usedPercent: 12, resetsAt: 1234 } } } };
 
 function mockProcess(options = {}) {
   const requests = [];
@@ -41,7 +40,7 @@ function mockProcess(options = {}) {
         const result = {
           initialize: { userAgent: options.userAgent || 'codex/0.151.0' },
           'account/read': { account: { type: options.authType || 'chatgpt', email: 'never-expose@example.test' } },
-          'account/rateLimits/read': options.quotas || quotas,
+          'account/rateLimits/read': options.quotas || {},
           'model/list': { data: [{ model, isDefault: true }] },
           'config/read': { config: { model_provider: 'openai', ...(options.inherited || {}) } },
           'thread/start': { thread: { id: 'thread-1' } },
@@ -120,11 +119,12 @@ test('structured query actions map to existing tool_calls; tool evidence survive
   assert.equal(JSON.parse(input.transcript[1].content).price, 123);
 });
 
-test('status check reads account/models/quota without starting an inference or exposing account', async () => {
+test('status check reads account and models without starting an inference or exposing account', async () => {
   const h = mockProcess();
   const status = await h.client.testConfig(config);
   assert(status.ok);
   assert.deepEqual(status.models, [model]);
+  assert.equal(h.requests.some((r) => r.method === 'account/rateLimits/read'), false);
   assert.equal(h.requests.some((r) => /^(thread|turn)\//.test(r.method)), false);
   assert.doesNotMatch(JSON.stringify(status), /never-expose|apiKey/);
 });
@@ -137,54 +137,19 @@ test('Codex CLI compatibility is validated by protocol behavior instead of a ver
   }
 });
 
-test('quota and authentication failures are fail-closed before inference', async (t) => {
-  for (const options of [{ authType: 'apiKey' }, { quotas: {} }, { quotas: { rateLimits: { primary: { usedPercent: 50 } } } }]) {
-    await t.test(JSON.stringify(options), async () => {
-      const h = mockProcess(options);
-      assert.equal((await h.client.testConfig(config)).ok, false);
-      assert.equal(h.requests.some((r) => r.method === 'turn/start'), false);
-      assert(h.killed);
-    });
-  }
-  assert.throws(() => quotaStatus({ rateLimits: { primary: { usedPercent: null } } }), /无法确认/);
+test('authentication failures are fail-closed before inference', async () => {
+  const h = mockProcess({ authType: 'apiKey' });
+  assert.equal((await h.client.testConfig(config)).ok, false);
+  assert.equal(h.requests.some((r) => r.method === 'turn/start'), false);
+  assert(h.killed);
 });
 
-test('quota threshold is 50% in either window for both response formats', () => {
-  for (const format of ['legacy', 'buckets']) {
-    for (const window of ['primary', 'secondary']) {
-      for (const usedPercent of [0, 49, 49.99, 50, 50.01, 95, 100]) {
-        const bucket = { primary: { usedPercent: 0 }, secondary: { usedPercent: 0 } };
-        bucket[window].usedPercent = usedPercent;
-        const snapshot = format === 'legacy'
-          ? { rateLimits: bucket }
-          : { rateLimitsByLimitId: { codex: bucket } };
-        if (usedPercent < 50) {
-          assert.deepEqual(quotaStatus(snapshot).map((w) => w.usedPercent),
-            [bucket.primary.usedPercent, bucket.secondary.usedPercent]);
-        } else {
-          assert.throws(() => quotaStatus(snapshot), /安全阈值/);
-        }
-      }
-    }
-  }
-});
-
-test('new completions stop at 50% before inference and resume below the threshold', async () => {
-  for (const window of ['primary', 'secondary']) {
-    for (const usedPercent of [49.99, 50]) {
-      const bucket = { primary: { usedPercent: 0 }, secondary: { usedPercent: 0 } };
-      bucket[window].usedPercent = usedPercent;
-      const h = mockProcess({ quotas: { rateLimitsByLimitId: { codex: bucket } } });
-      if (usedPercent < 50) {
-        assert.equal((await h.client.complete(config, [], null)).content, '完成');
-        assert(h.requests.some((r) => r.method === 'turn/start'));
-      } else {
-        await assert.rejects(h.client.complete(config, [], null), /安全阈值/);
-        assert.equal(h.requests.some((r) => /^(thread|turn)\//.test(r.method)), false);
-      }
-      assert(h.killed);
-    }
-  }
+test('subscription usage percentage does not gate new completions', async () => {
+  const h = mockProcess({ quotas: { rateLimits: { primary: { usedPercent: 100 } } } });
+  assert.equal((await h.client.complete(config, [], null)).content, '完成');
+  assert(h.requests.some((r) => r.method === 'turn/start'));
+  assert.equal(h.requests.some((r) => r.method === 'account/rateLimits/read'), false);
+  assert(h.killed);
 });
 
 test('timeout, exit, native tool and abnormal completion cancel and clean up', async (t) => {

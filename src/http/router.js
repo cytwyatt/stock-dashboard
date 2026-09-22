@@ -204,7 +204,7 @@ function createHttpHandler({
             });
             return sendJSON(res, 200, {
               ok: true, configured: true, transport: 'codex',
-              message: '已选择 Codex；请测试服务器登录、模型和订阅额度。',
+              message: '已选择 Codex；请检查服务器登录和模型。',
             });
           }
           const rawBaseUrl = String(body.baseUrl || '').trim().slice(0, 200);

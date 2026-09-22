@@ -39,7 +39,6 @@ const SAFE_CONFIG = Object.freeze({
 const PERMISSIONS_PROFILE = 'market_text_only';
 const MAX_WIRE_BYTES = 2 * 1024 * 1024;
 const MAX_OUTPUT_CHARS = 200000;
-const QUOTA_STOP_PERCENT = 50;
 
 function codexError(message) {
   return new Error(`Codex：${message}（不会自动切换至付费 API）`);
@@ -169,23 +168,6 @@ function createRPC({ binary, cwd, env, spawnImpl = spawn, timeoutMs, onEvent }) 
   return { request, send, close, fail, failures, get failure() { return failure; } };
 }
 
-function quotaStatus(result) {
-  const bucket = result?.rateLimitsByLimitId?.codex || result?.rateLimits;
-  const windows = [bucket?.primary, bucket?.secondary].filter(Boolean);
-  if (!windows.length || windows.some((w) => !Number.isFinite(w.usedPercent))) {
-    throw codexError('无法确认订阅剩余额度，已暂停调用');
-  }
-  if (bucket.spendControlReached || bucket.rateLimitReachedType
-      || windows.some((w) => w.usedPercent >= QUOTA_STOP_PERCENT)) {
-    throw codexError('订阅额度已用到安全阈值，请等待额度恢复');
-  }
-  return windows.map((w) => ({
-    usedPercent: w.usedPercent,
-    windowDurationMins: w.windowDurationMins ?? null,
-    resetsAt: w.resetsAt ?? null,
-  }));
-}
-
 function actionSchema(tools) {
   const properties = { content: { type: 'string' } };
   if (tools?.length) properties.toolCalls = {
@@ -306,7 +288,6 @@ function createCodexClient({ env = process.env, spawnImpl = spawn, now = Date.no
       rpc.send({ method: 'initialized' });
       const account = await rpc.request('account/read', { refreshToken: false });
       if (account?.account?.type !== 'chatgpt') throw codexError('请在服务器运行 codex login --device-auth，使用 ChatGPT 登录');
-      const windows = quotaStatus(await rpc.request('account/rateLimits/read'));
       const modelResult = await rpc.request('model/list', { includeHidden: false });
       const models = (modelResult?.data || []).filter((m) => typeof m.model === 'string');
       const model = cfg.model || models.find((m) => m.isDefault)?.model;
@@ -321,8 +302,8 @@ function createCodexClient({ env = process.env, spawnImpl = spawn, now = Date.no
         throw codexError('请使用未启用外部 MCP 的专用 Codex 配置，行情查询由看板提供');
       }
       if (statusOnly) return {
-        ok: true, message: 'ChatGPT 已登录，模型可用；额度检查通过（此检查不生成回答）',
-        models: models.map((m) => m.model), windows,
+        ok: true, message: 'ChatGPT 已登录，模型可用（此检查不生成回答）',
+        models: models.map((m) => m.model),
       };
       const config = { ...SAFE_CONFIG };
       const systems = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
@@ -400,7 +381,6 @@ module.exports = {
   SAFE_CONFIG,
   PERMISSIONS_PROFILE,
   safeEnvironment,
-  quotaStatus,
   actionSchema,
   decodeAction,
   hasOfficialRouting,

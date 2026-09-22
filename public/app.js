@@ -2914,7 +2914,7 @@ function showLLMTransport() {
   const codex = $('#llmTransport').value === 'codex';
   $('#llmApiFields').style.display = codex ? 'none' : 'block';
   $('#llmCodexFields').style.display = codex ? 'block' : 'none';
-  $('#llmTest').textContent = codex ? '保存并检查登录 / 额度' : '保存并测试';
+  $('#llmTest').textContent = codex ? '保存并检查登录 / 模型' : '保存并测试';
   setLLMStatus('');
 }
 
@@ -2945,7 +2945,7 @@ async function openLLMConfig() {
         ? `下一份复盘单独使用 ${reviewModelValue}；清空后使用 ${fallbackReviewModel}。`
         : `留空时使用 ${fallbackReviewModel}；只影响下一份尚未生成的复盘。`;
     $('#llmKey').placeholder = cfg.configured ? `已保存 ${cfg.keyMask}（留空表示不修改）` : '请输入 API Key';
-    if (cfg.transport === 'codex') setLLMStatus('Codex 模式已选择；可检查服务器登录和订阅额度。');
+    if (cfg.transport === 'codex') setLLMStatus('Codex 模式已选择；可检查服务器登录和模型。');
     else if (!cfg.configured) setLLMStatus('尚未配置 API Key', false);
     else if (match?.id === 'deepseek' && ['deepseek-chat', 'deepseek-reasoner'].includes(cfg.model)) {
       setLLMStatus('当前使用即将停用的 DeepSeek 旧模型名称，请改为 V4 Flash 或 V4 Pro。', false);
