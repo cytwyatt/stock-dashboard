@@ -1247,6 +1247,7 @@ async function loadModalProfile() {
 }
 
 function renderResearchLoading() {
+  StockFactors.loading();
   const card = $('#mResearch');
   card.style.display = 'block';
   card.setAttribute('aria-busy', 'true');
@@ -1256,6 +1257,7 @@ function renderResearchLoading() {
 }
 
 function renderResearchCard(data) {
+  StockFactors.render(data.factorAnalysis);
   const card = $('#mResearch');
   const benchmarkLabel = data.benchmark && data.benchmark.name
     ? `相对 ${data.benchmark.name}${data.benchmark.available ? '' : '（暂不可用）'}`
@@ -1341,6 +1343,7 @@ function renderResearchCard(data) {
 }
 
 function renderResearchError() {
+  StockFactors.error();
   const card = $('#mResearch');
   card.setAttribute('aria-busy', 'false');
   $('#mResearchBenchmark').textContent = '';
@@ -1416,6 +1419,7 @@ function openStock(code, name = '') {
 }
 
 function closeStock() {
+  StockFactors.close();
   $('#stockModal').style.display = 'none';
   modal.code = null;
   modal.req++;

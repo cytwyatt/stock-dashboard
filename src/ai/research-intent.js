@@ -94,7 +94,7 @@ function targetsDifferentStock(text, stockContext) {
     codes.push(sanitizeCode(match[1]), sanitizeCode(match[2]));
   }
   const leadingTicker = tickerQuestion.match(/^\s*(?:请问|想问|我想问|我觉得|我想了解)?\s*\$?([A-Z][A-Z0-9]{0,7}(?:[.=-][A-Z0-9]{1,8})?)\b/i);
-  if (leadingTicker) codes.push(sanitizeCode(leadingTicker[1]));
+  if (leadingTicker && leadingTicker[1].toUpperCase() !== 'BETA') codes.push(sanitizeCode(leadingTicker[1]));
   for (const match of tickerQuestion.matchAll(/[、,，/]\s*\$?([A-Z][A-Z0-9]{0,7}(?:[.=-][A-Z0-9]{1,8})?)\b/gi)) {
     codes.push(sanitizeCode(match[1]));
   }
@@ -153,11 +153,15 @@ function hasStockResearchIntent(text, stockContext = null) {
   const question = unwrapStockChatQuestion(text);
   if (!question || targetsDifferentStock(question, stockContext)) return false;
   const comparisonIntent = STOCK_COMPARISON_INTENT_RE.test(question);
-  const metricIntent = STOCK_RESEARCH_METRIC_INTENT_RE.test(question)
+  const factorIntent = /因子|动量|贝塔|β|\bbeta\b/i.test(question)
+    && !/翻译|改写|润色/.test(question)
+    && (!/价值|估值|质量|成长|规模|财报|盈利/.test(question)
+      || /多因子|价格|动量|波动|量能|贝塔|β|\bbeta\b/i.test(question));
+  const metricIntent = factorIntent || STOCK_RESEARCH_METRIC_INTENT_RE.test(question)
     || (comparisonIntent && /表现|收益|强弱|波动|回撤/.test(question));
   const riskIntent = STOCK_RESEARCH_RISK_INTENT_RE.test(question);
   const decisionIntent = STOCK_RESEARCH_DECISION_INTENT_RE.test(question);
-  const marketOnlyIntent = /(?:大盘|指数|市场)/i.test(question)
+  const marketOnlyIntent = /(?:大盘|指数|市场)/i.test(question.replace(/市场\s*(?:beta|贝塔|β)/ig, ''))
     && !/(?:这只|该股|个股|股票)/i.test(question)
     && !comparisonIntent;
   if (marketOnlyIntent) return false;
@@ -209,6 +213,7 @@ function compactResearchCardForEvidence(result) {
       range52: data.range52,
       risk: data.risk,
       volume20: data.volume20,
+      ...(data.factorAnalysis ? { factorAnalysis: compactFactorAnalysis(data.factorAnalysis) } : {}),
       quality: data.quality,
       signals: data.signals,
     },
@@ -227,6 +232,18 @@ function compactResearchCardForEvidence(result) {
   };
 }
 
+function compactFactorAnalysis(value) {
+  if (!value) return value;
+  return {
+    asOf: value.asOf, version: value.version, comparisonBasis: value.comparisonBasis,
+    factors: (value.factors || []).map((factor) => ({
+      id: factor.id, label: factor.label, value: factor.value, unit: factor.unit,
+      percentile: factor.percentile, referenceCount: factor.reference.count, reason: factor.reason,
+    })),
+    warnings: value.warnings, uncovered: value.uncovered,
+  };
+}
+
 module.exports = {
   STOCK_REASON_INTENT_RE,
   STOCK_RESEARCH_METRIC_INTENT_RE,
@@ -242,4 +259,5 @@ module.exports = {
   isAbnormalQuote,
   compactQuoteForEvidence,
   compactResearchCardForEvidence,
+  compactFactorAnalysis,
 };

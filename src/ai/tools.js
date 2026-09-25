@@ -1,10 +1,12 @@
 'use strict';
 
+const { compactFactorAnalysis } = require('./research-intent');
+
 const LLM_TOOLS = [
   { name: 'get_indices', description: '获取大盘指数实时行情。market=cn 返回上证/深成/创业板/沪深300/科创50；market=hk 返回恒生指数/国企指数/恒生科技；market=us 返回道琼斯/纳斯达克/标普500', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] } }, required: ['market'] } },
   { name: 'get_quote', description: '获取单只股票的详细实时报价（价格、涨跌幅、成交量额、换手率、市盈率、市值、五档盘口等；美股可另带盘前/盘后报价）。A股代码格式如 sh600519/sz300750，港股如 hk00700，美股代码如 AAPL/TSLA，也支持 ^VIX、GC=F 黄金、BTC-USD 等', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
   { name: 'get_kline', description: '获取股票或指数的复权K线历史（日K/周K/月K，最近最多40根，含开高低收和成交量）。meta.adjustmentBasis说明复权口径，meta.stale说明是否为刷新失败后的旧缓存', parameters: { type: 'object', properties: { code: { type: 'string' }, period: { type: 'string', enum: ['day', 'week', 'month'] } }, required: ['code'] } },
-  { name: 'get_research_card', description: '获取个股研究卡：1/5/20/60/120日复权收益、相对同市场价格指数的超额收益、52周位置、20日年化波动率、120日最大回撤和较20日均量。适合回答阶段表现、风险和相对强弱；超额为简单收益率百分点差，不是风险调整后Alpha。若meta.stale=true或signals提示旧缓存，回答必须明确数据日期和缓存状态', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
+  { name: 'get_research_card', description: '获取个股研究卡：1/5/20/60/120日复权收益、相对同市场价格指数的超额收益、52周位置、20日年化波动率、120日最大回撤和较20日均量，以及个股多因子（动量、相对强弱、波动、Beta、回撤幅度、量能）与自身历史分位；没有同行排名和财务因子。适合回答阶段表现、风险和相对强弱；超额为简单收益率百分点差，不是风险调整后Alpha。若meta.stale=true或signals提示旧缓存，回答必须明确数据日期和缓存状态', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
   { name: 'get_intraday', description: '获取当日分时走势（抽样点位），美股点位可带盘前/常规/盘后时段标记', parameters: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'] } },
   { name: 'get_sectors', description: '获取A股行业板块涨跌幅、腾讯口径估算主力净流入（亿元）和领涨股。资金流是供应商估算值，不能视为可核验的真实资金流', parameters: { type: 'object', properties: {} } },
   { name: 'get_rank', description: '获取涨幅榜或跌幅榜个股。market=cn 沪深两市，market=hk 港股，market=us 美股', parameters: { type: 'object', properties: { market: { type: 'string', enum: ['cn', 'hk', 'us'] }, dir: { type: 'string', enum: ['up', 'down'] } }, required: ['market', 'dir'] } },
@@ -56,7 +58,9 @@ function createToolRunner({
         const code = sanitizeCode(args.code || '');
         if (!code) throw new Error('code required');
         const entry = await marketService.research(code);
-        return { data: entry.data, meta: marketMeta(entry, { market: marketForCode(code) }) };
+        const data = { ...entry.data };
+        if (data.factorAnalysis) data.factorAnalysis = compactFactorAnalysis(data.factorAnalysis);
+        return { data, meta: marketMeta(entry, { market: marketForCode(code) }) };
       }
       case 'get_intraday': {
         const code = sanitizeCode(args.code || '');

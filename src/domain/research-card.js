@@ -1,5 +1,7 @@
 'use strict';
 
+const { computeStockFactors } = require('./stock-factors');
+
 // ---------- 个股研究卡（复权日线 + 同市场价格指数基准） ----------
 const RESEARCH_DAYS = 400;
 const RESEARCH_HORIZONS = [1, 5, 20, 60, 120];
@@ -24,7 +26,7 @@ function normalizeDailySeries(rows) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(close) || close <= 0) continue;
     const high = Number(row.high);
     const low = Number(row.low);
-    const volume = Number(row.volume);
+    const volume = row.volume == null || row.volume === '' ? NaN : Number(row.volume);
     byDate.set(date, {
       date,
       close,
@@ -343,6 +345,7 @@ function computeResearchCard(stockInput, benchmarkInput, options = {}) {
       partialSessionRisk: 'unfinished_daily_bar_excluded_from_volatility_and_drawdown',
     },
   };
+  card.factorAnalysis = computeStockFactors(stockRows, benchmarkRows, options);
   card.signals = buildResearchSignals(card);
   if (card.quality.degraded) {
     card.signals.unshift({

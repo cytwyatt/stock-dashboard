@@ -203,7 +203,24 @@
           <span class="research-benchmark" id="mResearchBenchmark"></span>
           <span class="data-meta" id="mResearchMeta"></span>
         </div>
-        <div class="research-body" id="mResearchBody"></div>
+        <div class="research-tabs" role="tablist" aria-label="个股研究视图">
+          <button type="button" id="researchPerformanceTab" role="tab" aria-selected="true" aria-controls="mResearchBody">阶段表现</button>
+          <button type="button" id="researchFactorsTab" role="tab" aria-selected="false" aria-controls="mFactors">多因子分析</button>
+        </div>
+        <div class="research-body" id="mResearchBody" role="tabpanel" aria-labelledby="researchPerformanceTab"></div>
+        <div id="mFactors" role="tabpanel" aria-labelledby="researchFactorsTab" hidden>
+          <div class="factor-intro" id="factorIntro"></div>
+          <div class="factor-list" id="factorList" aria-label="选择因子查看走势"></div>
+          <div id="factorDetail" hidden>
+            <div class="factor-detail-head"><h4 id="factorChartTitle"></h4><span id="factorChartValue"></span></div>
+            <div id="factorChart" class="factor-chart" role="img"></div>
+            <div id="factorChartEmpty" class="factor-chart-empty" hidden>历史样本不足，暂无法绘制曲线。</div>
+            <p class="factor-description" id="factorDescription"></p>
+            <p class="factor-reference" id="factorReference"></p>
+          </div>
+          <div class="factor-warnings" id="factorWarnings" role="status"></div>
+          <details class="factor-method"><summary>覆盖范围与计算口径</summary><p id="factorCoverage"></p><p id="factorMethodology"></p></details>
+        </div>
       </section>
       <div class="modal-book" id="mBook" style="display:none"></div>
       <div class="chart-switch modal-switch" id="mChartSwitch">
@@ -269,6 +286,7 @@
     </div>
   </div>
 
+  <script src="stock-factors.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

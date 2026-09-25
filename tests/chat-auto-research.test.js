@@ -225,7 +225,7 @@ test('个股研究意图只覆盖投研问题，并在首次模型请求前自�
   try {
     const positive = await postChat(port, {
       sessionId: 'research-positive',
-      message: '分析股票 贵州茅台（代码：sh600519，市场：A股）。综合分析阶段表现、波动和最大回撤。',
+      message: '分析股票 贵州茅台（代码：sh600519，市场：A股）。做个股多因子分析。',
       stockContext,
     });
     assert.equal(positive.status, 200);
@@ -254,6 +254,13 @@ test('个股研究意图只覆盖投研问题，并在首次模型请求前自�
       assert.ok(researchMessage.includes(marker), marker);
     }
     assert.ok(researchMessage.length < 8000, `研究卡自动上下文过长：${researchMessage.length}`);
+    assert.ok(researchMessage.includes('"factorAnalysis"'));
+    assert.ok(researchMessage.includes('own_prior_observations'));
+    const researchAPI = await getJSON(port, '/api/research?code=sh600519');
+    assert.equal(researchAPI.status, 200);
+    assert.equal(researchAPI.data.data.factorAnalysis.factors.length, 6);
+    assert.equal(researchAPI.data.data.factorAnalysis.factors[0].history.length, 60);
+    assert.ok(researchAPI.data.meta.source);
     assert.equal(klineRequests.filter((url) => url.includes('day,,,400,qfq')).length, 2);
 
     const storedPositive = await getJSON(port, '/api/chat/sessions/research-positive');
